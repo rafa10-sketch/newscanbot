@@ -77,3 +77,16 @@ class BaseStage(ABC):
                 f"[{self.NAME}] {result.command[0]} failed: "
                 f"{result.stderr[:200]}"
             )
+        # Automatically capture for Task 3: Raw Data Preservation
+        self.save_raw_result(result.command[0], result)
+
+    def save_raw_result(self, tool_name: str, result: CommandResult) -> None:
+        """Capture raw tool output into context for later preservation."""
+        self.ctx.setdefault("raw_outputs", []).append({
+            "tool_name": Path(tool_name).name,
+            "stage_name": self.NAME,
+            "status": "success" if result.success else "failed",
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "duration": result.duration,
+        })

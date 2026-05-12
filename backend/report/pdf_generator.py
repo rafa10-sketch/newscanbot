@@ -4,6 +4,8 @@ Produces a professional, engineering-focused automated security assessment repor
 """
 
 import html
+import random
+import string
 from pathlib import Path
 
 from reportlab.lib import colors
@@ -31,7 +33,8 @@ class PDFGenerator:
 
     def generate(self, report: ReportData) -> Path:
         target_safe = report.metadata.target.replace(".", "_").replace("/", "_")
-        filename = f"report_{target_safe}_{report.metadata.scan_id}.pdf"
+        rand_chars = ''.join(random.choices(string.ascii_uppercase + string.digits, k=3))
+        filename = f"{rand_chars}_{target_safe}.pdf"
         out_path = self.output_dir / filename
 
         doc = SimpleDocTemplate(
@@ -183,18 +186,22 @@ class PDFGenerator:
 
         if result.subdomains:
             story.extend(self._section_subheader("Discovered Hosts"))
+            story.extend(self._tool_label("Subfinder, Assetfinder"))
             story.extend(self._bullet_list(result.subdomains[:30]))
 
         if result.resolved_ips:
             story.extend(self._section_subheader("Resolved IP Addresses"))
+            story.extend(self._tool_label("dnsx"))
             story.extend(self._bullet_list(result.resolved_ips[:20]))
 
         if result.origin_candidates:
             story.extend(self._section_subheader("Origin Candidates"))
+            story.extend(self._tool_label("Cloudflair"))
             story.extend(self._bullet_list(result.origin_candidates[:10]))
 
         if result.discovered_urls:
             story.extend(self._section_subheader("Prioritized Discovered URLs"))
+            story.extend(self._tool_label("Katana, Gau"))
             story.extend(self._bullet_list(result.discovered_urls[:20]))
 
         story.extend(self._section_subheader("Assessment Notes"))
@@ -207,6 +214,7 @@ class PDFGenerator:
 
         if result.open_ports:
             story.extend(self._section_subheader("Open Ports and Services"))
+            story.extend(self._tool_label("Naabu, Nmap"))
             items = []
             service_by_host_port = {
                 (str(service.get("host", "")).strip(), service.get("port")): service
@@ -229,6 +237,7 @@ class PDFGenerator:
         ]
         if high_value_ports:
             story.extend(self._section_subheader("Administrative or High-Value Exposure"))
+            story.extend(self._tool_label("PentestBot Risk Engine"))
             story.extend(self._bullet_list([
                 f"Port {port.port} / {port.service_name or 'unknown'} - {port.risk_note}"
                 for port in high_value_ports[:20]
@@ -244,6 +253,7 @@ class PDFGenerator:
 
         if result.live_hosts:
             story.extend(self._section_subheader("Live Web Endpoints"))
+            story.extend(self._tool_label("httpx"))
             endpoint_items = []
             for host in result.live_hosts[:20]:
                 endpoint = host.get("url", "")
@@ -262,10 +272,12 @@ class PDFGenerator:
 
         if result.technologies:
             story.extend(self._section_subheader("Detected Technologies"))
+            story.extend(self._tool_label("WhatWeb, Wafw00f, Webanalyze"))
             story.extend(self._bullet_list(result.technologies[:20]))
 
         if result.web_servers:
             story.extend(self._section_subheader("Observed Web Servers"))
+            story.extend(self._tool_label("httpx"))
             story.extend(self._bullet_list(result.web_servers[:10]))
 
         story.extend(self._section_subheader("Vulnerability Review"))
@@ -278,11 +290,13 @@ class PDFGenerator:
 
         if result.cert_info:
             story.extend(self._section_subheader("Certificate Information"))
+            story.extend(self._tool_label("testssl.sh"))
             cert_rows = [(key.replace("_", " ").title(), value) for key, value in result.cert_info.items() if value]
             story.extend(self._kv_list(cert_rows))
 
         if result.tls_findings:
             story.extend(self._section_subheader("Observed TLS Findings"))
+            story.extend(self._tool_label("testssl.sh"))
             story.extend(self._bullet_list([
                 f"{finding.get('id', 'tls')} - {finding.get('description', '')}"
                 for finding in result.tls_findings[:20]
@@ -370,6 +384,12 @@ class PDFGenerator:
         return story
 
     def _finding_block(self, index: int, finding: Finding) -> list:
+        story = [
+            Paragraph(f"{index}. {self._escape(finding.title)}", self.styles["finding_title"]),
+            Spacer(1, 0.1 * cm),
+        ]
+        story.extend(self._tool_label(finding.source or "Heuristic Analysis"))
+        
         lines = [
             ("Evidence Status", self._finding_evidence_status(finding)),
             ("Exploitability", self._finding_exploitability(finding)),
@@ -387,10 +407,6 @@ class PDFGenerator:
         if finding.cve_ids:
             lines.append(("Associated Identifiers", ", ".join(finding.cve_ids[:5])))
 
-        story = [
-            Paragraph(f"{index}. {self._escape(finding.title)}", self.styles["finding_title"]),
-            Spacer(1, 0.1 * cm),
-        ]
         story.extend(self._kv_list(lines, style_name="finding_item"))
         story.extend([
             Spacer(1, 0.15 * cm),
@@ -472,6 +488,13 @@ class PDFGenerator:
             " ".join(finding.tags or []),
             " ".join(finding.affected or []),
         ]).lower()
+
+    def _tool_label(self, tool_name: str) -> list:
+        return [
+            Spacer(1, 0.1 * cm),
+            Paragraph(f"<i>Tool: {self._escape(tool_name)}</i>", self.styles["small"]),
+            Spacer(1, 0.05 * cm),
+        ]
 
     def _section_header(self, title: str) -> list:
         return [

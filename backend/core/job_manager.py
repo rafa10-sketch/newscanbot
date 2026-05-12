@@ -7,8 +7,11 @@ drives the pipeline, and persists all state.
 import asyncio
 import hashlib
 import ipaddress
+import json
+import random
 import re
 import socket
+import string
 import time
 import traceback
 from dataclasses import dataclass, field
@@ -199,14 +202,26 @@ class JobManager:
         return job
 
     async def cancel(self, scan_id: str) -> bool:
+        """Cancel a queued or running scan. Supports 'force cancel' for ghost scans."""
         cancelled = await self.queue.cancel(scan_id)
-        if cancelled:
-            job = self._jobs.get(scan_id)
-            if job:
-                job.state = JobState.CANCELLED
-                job.completed_at = datetime.utcnow()
-            await self.db.update_scan_state(scan_id, "cancelled")
-        return cancelled
+        
+        # Even if not in active queue (e.g. after restart), if it's "running" in DB, force cancel it.
+        if not cancelled:
+            scan = await self.db.get_scan(scan_id)
+            if scan and scan.get("state") in ("queued", "running"):
+                await self.db.update_scan_state(scan_id, "cancelled")
+                logger.info(f"Force-cancelled ghost scan {scan_id} in database.")
+                return True
+            return False
+
+        # If it was in the queue, also update local job state
+        job = self._jobs.get(scan_id)
+        if job:
+            job.state = JobState.CANCELLED
+            job.completed_at = datetime.utcnow()
+        
+        await self.db.update_scan_state(scan_id, "cancelled")
+        return True
 
     def get_job(self, scan_id: str) -> Optional[ScanJob]:
         return self._jobs.get(scan_id)
@@ -241,7 +256,7 @@ class JobManager:
         from pipeline.web_discovery import WebDiscoveryStage
         from pipeline.vuln_scan  import VulnScanStage
         from pipeline.tls_scan   import TLSScanStage
-        from pipeline.screenshots import ScreenshotsStage
+        from pipeline.git_exposure import GitExposureStage
         from analysis.result_aggregator import ResultAggregator
         from analysis.normalizer        import Normalizer
         from analysis.groq_ai           import GroqAI
@@ -255,8 +270,8 @@ class JobManager:
         # Pre-populate all stages as queued so the UI shows them immediately
         all_stages = [
             "Recon", "Resolver", "OriginIP", "PortScan", "ServiceScan",
-            "HTTPProbe", "Fingerprint", "WebDiscovery", "TLSScan", "Screenshots",
-            "VulnScan", "Aggregation", "AIAnalysis", "Report"
+            "HTTPProbe", "Fingerprint", "WebDiscovery", "TLSScan",
+            "VulnScan", "GitExposure", "Aggregation", "AIAnalysis", "Report"
         ]
         for stage in all_stages:
             await self.db.upsert_stage(job.scan_id, stage, "queued")
@@ -403,18 +418,11 @@ class JobManager:
                         await tls_scan.handle_timeout()
                     await finalize_stage("TLSScan")
 
-                async def run_screenshots():
-                    await notify("Screenshots", "Capturing automated screenshots of live endpoints...")
-                    ss = ScreenshotsStage(ctx)
-                    await asyncio.wait_for(ss.run(), timeout=300)
-                    await finalize_stage("Screenshots")
-
-                # Execute Fingerprint, Web Discovery, TLS Scan, and Screenshots concurrently
+                # Execute Fingerprint, Web Discovery, and TLS Scan concurrently
                 await asyncio.gather(
                     run_fingerprint(),
                     run_web_discovery(),
                     run_tls_scan(),
-                    run_screenshots(),
                 )
 
                 # ── Stage 9: Vulnerability Scanning (Depends on 6, 7, 8) ───
@@ -430,10 +438,19 @@ class JobManager:
                 run_infra_pipeline(),
                 run_web_pipeline(),
             )
+            
+            # ── Stage 11: Git Exposure (Custom Script) ────────────────────
+            await notify("GitExposure", f"Checking for Git exposure using custom script...")
+            git_exposure = GitExposureStage(ctx)
+            await asyncio.wait_for(git_exposure.run(), timeout=300)
+            await finalize_stage("GitExposure", len(ctx.get("git_exposure_findings", [])))
+
             await finalize_stage("System")
 
             # ── Persist raw tool outputs ──────────────────────────────────
+            raw_data = []
             for raw_entry in ctx.get("raw_outputs", []):
+                raw_data.append(raw_entry)
                 await self.db.save_raw_output(
                     scan_id=job.scan_id,
                     tool_name=raw_entry.get("tool_name", "unknown"),
@@ -441,7 +458,23 @@ class JobManager:
                     status=raw_entry.get("status", "success"),
                     stdout=raw_entry.get("stdout", ""),
                     stderr=raw_entry.get("stderr", ""),
+                    duration=raw_entry.get("duration", 0.0),
                 )
+            
+            # Save Raw JSON file for Task 3
+            if raw_data:
+                try:
+                    # Use the same unique name as the PDF
+                    # Note: pdf_gen.generate hasn't run yet, so we need the logic here or wait
+                    # Actually, let's create the filename here
+                    prefix = "".join(random.choices(string.ascii_uppercase + string.digits, k=3))
+                    raw_filename = f"{prefix}_{job.target.replace('.', '_')}.json"
+                    raw_path = self.config.reports_dir / raw_filename
+                    raw_path.write_text(json.dumps(raw_data, indent=2), encoding="utf-8")
+                    ctx["raw_json_path"] = raw_path
+                    scan_log.info(f"[System] Raw scan data preserved: {raw_filename}")
+                except Exception as e:
+                    scan_log.warning(f"[System] Failed to save raw JSON: {e}")
 
             # ── Stage 11: Aggregation + AI + Report ──────────────────────
             await notify("Aggregation", "Aggregating and normalizing all results...")
@@ -510,6 +543,7 @@ class JobManager:
             await self.db.update_scan_state(
                 job.scan_id, "completed",
                 pdf_path=str(pdf_path),
+                raw_path=str(ctx.get("raw_json_path", "")),
                 summary=summary,
             )
             await self.db.audit(

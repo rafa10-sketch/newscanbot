@@ -6,6 +6,7 @@ import {
   getScanStatus,
   getScanLogs,
   downloadReport,
+  downloadRawData,
   cancelScan,
   deleteScan,
   type ScanStatus,
@@ -23,6 +24,7 @@ const STAGE_LABELS: Record<string, string> = {
   Fingerprint: "Fingerprinting",
   WebDiscovery: "Web Discovery",
   VulnScan: "Vulnerability Scan",
+  GitExposure: "Git Exposure Check",
   TLSScan: "TLS Analysis",
   Aggregation: "Aggregation",
   AIAnalysis: "AI Analysis",
@@ -451,6 +453,15 @@ export default function ScanPage() {
             onClick={() => downloadReport(scanId).catch((e) => alert(e.message))}
           >
             📄 Download PDF Report
+          </button>
+        )}
+        {scan.rawReady && (
+          <button
+            className="btn btn-ghost"
+            style={{ color: "var(--accent-cyan)", borderColor: "rgba(34, 211, 238, 0.2)" }}
+            onClick={() => downloadRawData(scanId).catch((e) => alert(e.message))}
+          >
+            📊 Download Raw JSON
           </button>
         )}
       </div>

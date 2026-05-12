@@ -47,6 +47,9 @@ export interface ScanStatus {
   completedAt: string | null;
   error: string | null;
   pdfReady: boolean;
+  reportFilename?: string | null;
+  rawReady: boolean;
+  rawFilename?: string | null;
   summary: ScanSummary | null;
   stages: ScanStage[];
 }
@@ -59,6 +62,9 @@ export interface ScanListItem {
   createdAt: string | null;
   completedAt: string | null;
   pdfReady: boolean;
+  reportFilename?: string | null;
+  rawReady: boolean;
+  rawFilename?: string | null;
   summary: ScanSummary | null;
 }
 
@@ -126,6 +132,10 @@ export async function deleteScan(scanId: string): Promise<{ scanId: string; dele
 }
 
 export async function downloadReport(scanId: string): Promise<void> {
+  // Ambil data status terbaru untuk mendapatkan nama file asli
+  const status = await getScanStatus(scanId);
+  const reportFilename = status.reportFilename || `security_assessment_${scanId}.pdf`;
+
   const url = `${API_BASE}/api/scans/${scanId}/report`;
   const headers: Record<string, string> = {};
   if (API_TOKEN) {
@@ -136,10 +146,36 @@ export async function downloadReport(scanId: string): Promise<void> {
     const body = await res.json().catch(() => ({ detail: res.statusText }));
     throw new Error(body.detail || `Failed to download report: ${res.status}`);
   }
+
   const blob = await res.blob();
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
-  a.download = `security_assessment_${scanId}.pdf`;
+  a.download = reportFilename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(a.href);
+}
+
+export async function downloadRawData(scanId: string): Promise<void> {
+  const status = await getScanStatus(scanId);
+  const rawFilename = status.rawFilename || `raw_scan_data_${scanId}.json`;
+
+  const url = `${API_BASE}/api/scans/${scanId}/raw`;
+  const headers: Record<string, string> = {};
+  if (API_TOKEN) {
+    headers["Authorization"] = `Bearer ${API_TOKEN}`;
+  }
+  const res = await fetch(url, { headers });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(body.detail || `Failed to download raw data: ${res.status}`);
+  }
+
+  const blob = await res.blob();
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = rawFilename;
   document.body.appendChild(a);
   a.click();
   a.remove();

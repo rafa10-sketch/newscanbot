@@ -1,11 +1,21 @@
+# ============================================================
+# PentestBot v2 — Docker Compose
+# 4-Service Architecture:
+#   1. engine     – FastAPI + Scanner Pipeline (port 8000)
+#   2. frontend   – Next.js Dashboard (port 3000)
+#   3. cloudflared – Cloudflare Tunnel for public access
+# ============================================================
+
 services:
+  # ── Engine (Backend + Scanner) ──────────────────────────────
   engine:
     build:
       context: ./backend
       dockerfile: Dockerfile
     container_name: pentestbot-engine
     restart: unless-stopped
-    network_mode: host
+    ports:
+      - "${ENGINE_PORT:-8000}:8000"
     environment:
       - GROQ_API_KEYS=${GROQ_API_KEYS:-${GROQ_API_KEY:-}}
       - GROQ_MODEL=${GROQ_MODEL:-llama-3.3-70b-versatile}
@@ -14,6 +24,7 @@ services:
       - CORS_ORIGINS=${CORS_ORIGINS:-*}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - MAX_CONCURRENT_SCANS=${MAX_CONCURRENT_SCANS:-3}
+      # Tool toggles
       - ENABLE_AMASS=${ENABLE_AMASS:-false}
       - ENABLE_GOBUSTER=${ENABLE_GOBUSTER:-true}
       - ENABLE_FINGERPRINT=${ENABLE_FINGERPRINT:-true}
@@ -22,6 +33,7 @@ services:
       - ENABLE_JOOMSCAN=${ENABLE_JOOMSCAN:-false}
       - ENABLE_S3SCANNER=${ENABLE_S3SCANNER:-false}
       - ENABLE_SSLYZE=${ENABLE_SSLYZE:-true}
+      # Scan tuning
       - NAABU_TOP_PORTS=${NAABU_TOP_PORTS:-1000}
       - NAABU_RATE=${NAABU_RATE:-1000}
       - NUCLEI_SEVERITY=${NUCLEI_SEVERITY:-critical,high,medium}
@@ -33,7 +45,9 @@ services:
       - engine-reports:/app/reports
       - nuclei-templates:/home/pentestbot/.config/nuclei
     cap_add:
-      - NET_RAW
+      - NET_RAW          # Required for naabu/nmap raw sockets
+    networks:
+      - pentestbot
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
       interval: 30s
@@ -41,6 +55,7 @@ services:
       start_period: 60s
       retries: 3
 
+  # ── Frontend (Next.js Dashboard) ────────────────────────────
   frontend:
     build:
       context: ./frontend
@@ -52,6 +67,9 @@ services:
     restart: unless-stopped
     ports:
       - "${FRONTEND_PORT:-3000}:3000"
+    depends_on:
+      engine:
+        condition: service_healthy
     networks:
       - pentestbot
     healthcheck:
@@ -61,16 +79,18 @@ services:
       start_period: 15s
       retries: 3
 
+  # ── Cloudflare Tunnel (Public Access) ───────────────────────
   cloudflared:
     image: cloudflare/cloudflared:latest
     container_name: pentestbot-tunnel
+    network_mode: "host"
     restart: unless-stopped
-    network_mode: host
     command: tunnel run
     environment:
       - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}
       - TUNNEL_TRANSPORT_PROTOCOL=http2
 
+# ── Volumes ──────────────────────────────────────────────────
 volumes:
   engine-data:
     driver: local
@@ -81,6 +101,7 @@ volumes:
   nuclei-templates:
     driver: local
 
+# ── Network ──────────────────────────────────────────────────
 networks:
   pentestbot:
     driver: bridge

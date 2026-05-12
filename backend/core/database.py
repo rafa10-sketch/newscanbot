@@ -36,6 +36,7 @@ class Database:
         completed_at REAL,
         error       TEXT,
         pdf_path    TEXT,
+        raw_path    TEXT,
         summary     TEXT  -- JSON blob of key metrics
     );
 
@@ -109,8 +110,16 @@ class Database:
                 )
                 await self._conn.commit()
                 logger.info("Migration: added scan_mode column to scans table")
+            
+            if "raw_path" not in columns:
+                await self._conn.execute(
+                    "ALTER TABLE scans ADD COLUMN raw_path TEXT"
+                )
+                await self._conn.commit()
+                logger.info("Migration: added raw_path column to scans table")
         except Exception as e:
-            logger.warning(f"Migration check failed: {e}")
+            if "duplicate column name" not in str(e).lower():
+                logger.warning(f"Migration check failed: {e}")
 
     async def close(self) -> None:
         if self._conn:
@@ -140,6 +149,7 @@ class Database:
         state: str,
         error: Optional[str] = None,
         pdf_path: Optional[str] = None,
+        raw_path: Optional[str] = None,
         summary: Optional[dict] = None,
     ) -> None:
         now = time.time()
@@ -159,6 +169,9 @@ class Database:
         if pdf_path is not None:
             updates.append("pdf_path = ?")
             params.append(pdf_path)
+        if raw_path is not None:
+            updates.append("raw_path = ?")
+            params.append(raw_path)
         if summary is not None:
             updates.append("summary = ?")
             params.append(json.dumps(summary))
@@ -193,7 +206,7 @@ class Database:
     ) -> list[dict]:
         async with self._conn.execute(
             """SELECT scan_id, target, state, created_at, completed_at,
-                      pdf_path, summary, scan_mode
+                      pdf_path, raw_path, summary, scan_mode
                FROM scans
                WHERE user_id = ?
                ORDER BY created_at DESC
@@ -207,7 +220,7 @@ class Database:
         """Return the most recent scans across all users."""
         async with self._conn.execute(
             """SELECT scan_id, target, state, created_at, completed_at,
-                      pdf_path, summary, scan_mode
+                      pdf_path, raw_path, summary, scan_mode
                FROM scans
                ORDER BY created_at DESC
                LIMIT ?""",

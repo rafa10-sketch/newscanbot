@@ -38,6 +38,7 @@ STAGE_ORDER = [
     "Fingerprint",
     "WebDiscovery",
     "VulnScan",
+    "GitExposure",
     "TLSScan",
     "Aggregation",
     "AIAnalysis",
@@ -56,7 +57,8 @@ STAGE_PROGRESS = {
     "Fingerprint": 58,
     "WebDiscovery": 65,
     "VulnScan": 76,
-    "TLSScan": 85,
+    "GitExposure": 82,
+    "TLSScan": 87,
     "Aggregation": 90,
     "AIAnalysis": 94,
     "Report": 98,
@@ -132,6 +134,7 @@ def create_app(
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+        expose_headers=["Content-Disposition"],
     )
 
     # Store references for route handlers
@@ -230,8 +233,10 @@ def create_app(
             "createdAt": _to_iso(scan.get("created_at")),
             "startedAt": _to_iso(scan.get("started_at")),
             "completedAt": _to_iso(scan.get("completed_at")),
-            "error": scan.get("error"),
             "pdfReady": bool(scan.get("pdf_path")),
+            "reportFilename": Path(str(scan.get("pdf_path"))).name if scan.get("pdf_path") else None,
+            "rawReady": bool(scan.get("raw_path")),
+            "rawFilename": Path(str(scan.get("raw_path"))).name if scan.get("raw_path") else None,
             "scanMode": scan.get("scan_mode", "fast"),
             "summary": _summary_from_json(scan.get("summary")),
             "stages": [
@@ -283,6 +288,13 @@ def create_app(
             log_file = config.log_dir / f"scan_{scan_id}.log"
             if log_file.exists():
                 log_file.unlink()
+
+            # Delete Raw JSON
+            raw_path = scan.get("raw_path")
+            if raw_path:
+                raw_file = Path(str(raw_path))
+                if raw_file.exists():
+                    raw_file.unlink()
         except Exception as e:
             logger.warning(f"File cleanup during delete failed for {scan_id}: {e}")
 
@@ -330,6 +342,26 @@ def create_app(
             filename=pdf_path.name,
         )
 
+    @app.get("/api/scans/{scan_id}/raw", dependencies=[Depends(verify_token)])
+    async def get_scan_raw_data(scan_id: str):
+        scan = await database.get_scan(scan_id)
+        if not scan:
+            raise HTTPException(status_code=404, detail="Scan not found.")
+
+        raw_path = scan.get("raw_path")
+        if not raw_path:
+            raise HTTPException(status_code=409, detail="Raw data is not available.")
+
+        file_path = Path(str(raw_path))
+        if not file_path.exists():
+            raise HTTPException(status_code=404, detail="Raw data file is missing.")
+
+        return FileResponse(
+            path=str(file_path),
+            media_type="application/json",
+            filename=file_path.name,
+        )
+
     # ── List Recent Scans ────────────────────────────────────────────────
 
     @app.get("/api/scans", dependencies=[Depends(verify_token)])
@@ -341,9 +373,11 @@ def create_app(
                     "scanId": s.get("scan_id"),
                     "target": s.get("target"),
                     "state": s.get("state"),
-                    "createdAt": _to_iso(s.get("created_at")),
                     "completedAt": _to_iso(s.get("completed_at")),
                     "pdfReady": bool(s.get("pdf_path")),
+                    "reportFilename": Path(str(s.get("pdf_path"))).name if s.get("pdf_path") else None,
+                    "rawReady": bool(s.get("raw_path")),
+                    "rawFilename": Path(str(s.get("raw_path"))).name if s.get("raw_path") else None,
                     "scanMode": s.get("scan_mode", "fast"),
                     "summary": _summary_from_json(s.get("summary")),
                 }

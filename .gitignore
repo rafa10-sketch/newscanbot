@@ -1,0 +1,4 @@
+.env
+backend/.env
+backend/logs/
+backend/reports/*.pdf
