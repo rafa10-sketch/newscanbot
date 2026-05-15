@@ -51,6 +51,10 @@ class ReportData:
     asset_stats: dict  = field(default_factory=dict)
     scan_stages: list  = field(default_factory=list)
 
+    # AI Attribution
+    ai_engine_label: str  = "GROQ-BACKUP"
+    ai_attribution:  dict = field(default_factory=dict)
+
 
 class ReportBuilder:
     """
@@ -120,4 +124,6 @@ class ReportBuilder:
             low_findings      = by_severity.get("low", []),
             info_findings     = by_severity.get("info", []),
             asset_stats       = asset_stats,
+            ai_engine_label   = getattr(analysis, "engine_used", "GROQ-BACKUP"),
+            ai_attribution    = getattr(analysis, "engine_attribution", {}),
         )

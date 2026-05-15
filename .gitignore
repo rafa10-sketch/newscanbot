@@ -1,4 +1,32 @@
+# Environment secrets — NEVER commit
 .env
-backend/.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# Node
+node_modules/
+.next/
+.npm/
+
+# Data & runtime artifacts
+backend/data/
 backend/logs/
-backend/reports/*.pdf
+backend/reports/
+backend/work/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db

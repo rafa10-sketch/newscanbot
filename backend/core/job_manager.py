@@ -259,7 +259,7 @@ class JobManager:
         from pipeline.git_exposure import GitExposureStage
         from analysis.result_aggregator import ResultAggregator
         from analysis.normalizer        import Normalizer
-        from analysis.groq_ai           import GroqAI
+        from analysis.ai_engine         import AIEngine
         from report.report_builder      import ReportBuilder
         from report.pdf_generator       import PDFGenerator
 
@@ -490,8 +490,8 @@ class JobManager:
             await self.db.save_results(job.scan_id, normalized.to_dict())
             await finalize_stage("Aggregation", 1)
 
-            await notify("AIAnalysis", "Running AI-powered security analysis...")
-            ai = GroqAI(self.config.groq)
+            await notify("AIAnalysis", "Running AI-powered security analysis (Gemini 1.5 Pro → Groq fallback)...")
+            ai = AIEngine(self.config.gemini, self.config.groq)
             try:
                 analysis = await ai.analyze(normalized)
                 # Enrich top findings with AI-rewritten descriptions

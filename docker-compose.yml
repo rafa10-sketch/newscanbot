@@ -19,6 +19,14 @@ services:
     environment:
       - GROQ_API_KEYS=${GROQ_API_KEYS:-${GROQ_API_KEY:-}}
       - GROQ_MODEL=${GROQ_MODEL:-llama-3.3-70b-versatile}
+      - GROQ_MAX_TOKENS=${GROQ_MAX_TOKENS:-4096}
+      - GROQ_TEMPERATURE=${GROQ_TEMPERATURE:-0.2}
+      # Gemini AI (Primary Engine — optional, falls back to Groq if empty)
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-1.5-pro-latest}
+      - GEMINI_MAX_TOKENS=${GEMINI_MAX_TOKENS:-8192}
+      - GEMINI_TEMPERATURE=${GEMINI_TEMPERATURE:-0.2}
+      - GEMINI_TIMEOUT=${GEMINI_TIMEOUT:-120}
       - PENTESTBOT_API_PORT=8000
       - PENTESTBOT_API_TOKEN=${PENTESTBOT_API_TOKEN:-}
       - CORS_ORIGINS=${CORS_ORIGINS:-*}

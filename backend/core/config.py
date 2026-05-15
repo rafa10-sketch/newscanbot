@@ -46,20 +46,6 @@ class TelegramConfig:
 
 
 @dataclass
-class GeminiConfig:
-    """Configuration for Google Gemini 1.5 Pro (primary AI engine)."""
-    api_key: str       = ""
-    model: str         = "gemini-1.5-pro-latest"
-    max_tokens: int    = 8192
-    temperature: float = 0.2
-    timeout: int       = 120
-
-    @property
-    def enabled(self) -> bool:
-        return bool(self.api_key.strip())
-
-
-@dataclass
 class GroqConfig:
     api_keys: list[str]
     model: str             = "llama-3.3-70b-versatile"
@@ -79,6 +65,20 @@ class GroqConfig:
     def api_key(self) -> str:
         """Backward-compat: returns the first key."""
         return self.api_keys[0]
+
+
+@dataclass
+class GeminiConfig:
+    api_key: str
+    model: str             = "gemini-1.5-pro"
+    max_tokens: int        = 4096
+    temperature: float     = 0.2
+    timeout: int           = 120
+    retry_attempts: int    = 3
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.api_key.strip())
 
 
 @dataclass
@@ -242,15 +242,12 @@ def load_config(env_file: str = ".env", require_secrets: bool = True) -> Config:
         max_tokens=int(os.getenv("GROQ_MAX_TOKENS", "4096")),
         temperature=float(os.getenv("GROQ_TEMPERATURE", "0.2")),
     )
-    if require_secrets and not api_keys:
-        raise ValueError("GROQ_API_KEYS is required in .env (comma-separated list)")
 
     gemini = GeminiConfig(
-        api_key=os.getenv("GEMINI_API_KEY", "").strip(),
-        model=os.getenv("GEMINI_MODEL", "gemini-1.5-pro-latest").strip(),
-        max_tokens=int(os.getenv("GEMINI_MAX_TOKENS", "8192")),
+        api_key=os.getenv("GEMINI_API_KEY", ""),
+        model=os.getenv("GEMINI_MODEL", "gemini-1.5-pro"),
+        max_tokens=int(os.getenv("GEMINI_MAX_TOKENS", "4096")),
         temperature=float(os.getenv("GEMINI_TEMPERATURE", "0.2")),
-        timeout=int(os.getenv("GEMINI_TIMEOUT", "120")),
     )
 
     scan = ScanConfig(
