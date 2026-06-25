@@ -4,10 +4,55 @@ import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { createScan, listScans, deleteScan, type ScanListItem } from "@/lib/api";
 
+type ApiEndpointInput = {
+  method: string;
+  path: string;
+  name?: string;
+  body?: unknown;
+};
+
+const API_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
+
+function parseEndpointMatrix(raw: string): ApiEndpointInput[] | null {
+  const text = raw.trim();
+  if (!text) return [];
+
+  if (text.startsWith("[") || text.startsWith("{")) {
+    try {
+      const parsed = JSON.parse(text);
+      if (Array.isArray(parsed)) return parsed as ApiEndpointInput[];
+      if (Array.isArray(parsed?.endpoints)) return parsed.endpoints as ApiEndpointInput[];
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
+  return text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const [maybeMethod, ...rest] = line.split(/\s+/);
+      if (API_METHODS.includes(maybeMethod.toUpperCase()) && rest.length > 0) {
+        return { method: maybeMethod.toUpperCase(), path: rest.join(" ") };
+      }
+      return { method: "GET", path: line };
+    });
+}
+
 export default function HomePage() {
   const router = useRouter();
   const [target, setTarget] = useState("");
-  const [scanMode, setScanMode] = useState<"fast" | "deep">("fast");
+  const [originIp, setOriginIp] = useState("");
+  const [scanMode, setScanMode] = useState<"fast" | "deep" | "api">("fast");
+  const [apiEndpoints, setApiEndpoints] = useState("");
+  const [apiDraftMethod, setApiDraftMethod] = useState("GET");
+  const [apiDraftPath, setApiDraftPath] = useState("");
+  const [apiDraftName, setApiDraftName] = useState("");
+  const [apiDraftBody, setApiDraftBody] = useState("");
+  const [apiHeaders, setApiHeaders] = useState("");
+  const [apiCookies, setApiCookies] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [recentScans, setRecentScans] = useState<ScanListItem[]>([]);
@@ -23,6 +68,7 @@ export default function HomePage() {
     (safePage - 1) * itemsPerPage,
     safePage * itemsPerPage
   );
+  const apiEndpointCount = parseEndpointMatrix(apiEndpoints)?.length ?? 0;
 
   const fetchScans = () => {
     listScans()
@@ -69,7 +115,12 @@ export default function HomePage() {
     setError("");
 
     try {
-      const result = await createScan(trimmed, scanMode);
+      const result = await createScan(trimmed, scanMode, {
+        originIp: originIp.trim() || undefined,
+        apiEndpoints: scanMode === "api" ? apiEndpoints.trim() || undefined : undefined,
+        customHeaders: scanMode === "api" ? apiHeaders.trim() || undefined : undefined,
+        customCookies: scanMode === "api" ? apiCookies.trim() || undefined : undefined,
+      });
       router.push(`/scan/${result.scanId}`);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to start scan");
@@ -92,6 +143,45 @@ export default function HomePage() {
     } catch (err) {
       alert("Failed to delete scan.");
     }
+  };
+
+  const handleAddApiEndpoint = () => {
+    const path = apiDraftPath.trim();
+    if (!path) {
+      setError("API endpoint path is required.");
+      return;
+    }
+
+    const current = parseEndpointMatrix(apiEndpoints);
+    if (!current) {
+      setError("Endpoint matrix must be a JSON array or simple line list before adding more rows.");
+      return;
+    }
+
+    let parsedBody: unknown;
+    let hasBody = false;
+    if (apiDraftBody.trim()) {
+      try {
+        parsedBody = JSON.parse(apiDraftBody);
+        hasBody = true;
+      } catch {
+        setError("API request body must be valid JSON.");
+        return;
+      }
+    }
+
+    const endpoint: ApiEndpointInput = {
+      method: apiDraftMethod,
+      path,
+      ...(apiDraftName.trim() ? { name: apiDraftName.trim() } : {}),
+      ...(hasBody ? { body: parsedBody } : {}),
+    };
+
+    setApiEndpoints(JSON.stringify([...current, endpoint], null, 2));
+    setApiDraftPath("");
+    setApiDraftName("");
+    setApiDraftBody("");
+    setError("");
   };
 
   const formatTime = (iso: string | null) => {
@@ -120,31 +210,47 @@ export default function HomePage() {
         </p>
 
         {/* Scan Form */}
-        <div className="card" style={{ maxWidth: 620, margin: "0 auto" }}>
-          <form className="scan-form" onSubmit={handleSubmit}>
-            <input
-              id="target-input"
-              type="text"
-              className="scan-input"
-              placeholder="Enter target domain (e.g. example.com)"
-              value={target}
-              onChange={(e) => setTarget(e.target.value)}
-              disabled={loading}
-              autoFocus
-              autoComplete="off"
-              spellCheck={false}
-            />
-            <button
-              id="scan-submit"
-              type="submit"
-              className="btn btn-primary"
-              disabled={loading || !target.trim()}
-            >
-              {loading ? "Starting…" : "Start Scan"}
-            </button>
+        <div className="card" style={{ maxWidth: scanMode === "api" ? 860 : 620, margin: "0 auto" }}>
+          <form onSubmit={handleSubmit}>
+            <div className="scan-form">
+              <input
+                id="target-input"
+                type="text"
+                className="scan-input"
+                placeholder="Enter target domain (e.g. example.com)"
+                value={target}
+                onChange={(e) => setTarget(e.target.value)}
+                disabled={loading}
+                autoFocus
+                autoComplete="off"
+                spellCheck={false}
+              />
+              <input
+                id="origin-ip-input"
+                type="text"
+                className="scan-input"
+                placeholder="Origin IP for CF bypass (Optional)"
+                value={originIp}
+                onChange={(e) => setOriginIp(e.target.value)}
+                disabled={loading}
+                autoComplete="off"
+                spellCheck={false}
+              />
+            </div>
+            <div style={{ marginTop: "1.25rem", textAlign: "center" }}>
+              <button
+                id="scan-submit"
+                type="submit"
+                className="btn btn-primary"
+                disabled={loading || !target.trim()}
+                style={{ padding: "0.9rem 2.5rem", width: "100%" }}
+              >
+                {loading ? "Starting…" : "Start Scan"}
+              </button>
+            </div>
           </form>
-          {error && <div className="error-msg">{error}</div>}
-          <div className="mode-toggle-row">
+          {error && <div className="error-msg" style={{ marginTop: "1rem" }}>{error}</div>}
+          <div className="mode-toggle-row" style={{ marginTop: "1.5rem" }}>
             <span className="mode-label">Scan Mode</span>
             <div className="mode-toggle">
               <button
@@ -161,13 +267,103 @@ export default function HomePage() {
               >
                 🔬 In-Depth
               </button>
+              <button
+                type="button"
+                className={`mode-option ${scanMode === "api" ? "active api" : ""}`}
+                onClick={() => setScanMode("api")}
+              >
+                API
+              </button>
             </div>
             <span className="mode-hint">
               {scanMode === "fast"
                 ? "Quick reconnaissance scan"
-                : "Thorough deep analysis — takes longer"}
+                : scanMode === "deep"
+                  ? "Thorough deep analysis — takes longer"
+                  : "Authenticated application-layer API checks"}
             </span>
           </div>
+          {scanMode === "api" && (
+            <div className="api-scan-panel">
+              <div className="api-builder">
+                <div className="api-builder-grid">
+                  <select
+                    className="scan-input api-method-select"
+                    value={apiDraftMethod}
+                    onChange={(e) => setApiDraftMethod(e.target.value)}
+                    disabled={loading}
+                  >
+                    {API_METHODS.map((method) => (
+                      <option key={method} value={method}>{method}</option>
+                    ))}
+                  </select>
+                  <input
+                    type="text"
+                    className="scan-input"
+                    placeholder="/api/v1/resource or https://api.example.com/path"
+                    value={apiDraftPath}
+                    onChange={(e) => setApiDraftPath(e.target.value)}
+                    disabled={loading}
+                    autoComplete="off"
+                    spellCheck={false}
+                  />
+                  <input
+                    type="text"
+                    className="scan-input"
+                    placeholder="Test name"
+                    value={apiDraftName}
+                    onChange={(e) => setApiDraftName(e.target.value)}
+                    disabled={loading}
+                    autoComplete="off"
+                    spellCheck={false}
+                  />
+                </div>
+                <textarea
+                  className="scan-input scan-textarea compact"
+                  placeholder={'Optional JSON body:\n{"key":"..."}'}
+                  value={apiDraftBody}
+                  onChange={(e) => setApiDraftBody(e.target.value)}
+                  disabled={loading}
+                  spellCheck={false}
+                />
+                <div className="api-builder-actions">
+                  <button type="button" className="btn btn-ghost" onClick={handleAddApiEndpoint} disabled={loading}>
+                    Add Endpoint
+                  </button>
+                  <button type="button" className="btn btn-ghost" onClick={() => setApiEndpoints("")} disabled={loading || !apiEndpoints.trim()}>
+                    Clear Matrix
+                  </button>
+                  <span className="api-count-pill">{apiEndpointCount} endpoint{apiEndpointCount === 1 ? "" : "s"}</span>
+                </div>
+              </div>
+              <textarea
+                className="scan-input scan-textarea"
+                placeholder={'Endpoint matrix JSON or one endpoint per line:\nGET /api/users/me\nPOST /api/profile'}
+                value={apiEndpoints}
+                onChange={(e) => setApiEndpoints(e.target.value)}
+                disabled={loading}
+                spellCheck={false}
+              />
+              <textarea
+                className="scan-input scan-textarea compact"
+                placeholder={"Auth/custom headers, one per line:\nAuthorization: Bearer eyJ...\nX-API-Key: ..."}
+                value={apiHeaders}
+                onChange={(e) => setApiHeaders(e.target.value)}
+                disabled={loading}
+                spellCheck={false}
+              />
+              <input
+                type="text"
+                className="scan-input"
+                placeholder="Cookie header value, e.g. session=abc; csrftoken=xyz"
+                value={apiCookies}
+                onChange={(e) => setApiCookies(e.target.value)}
+                disabled={loading}
+                autoComplete="off"
+                spellCheck={false}
+              />
+            </div>
+          )}
         </div>
       </section>
 
@@ -226,7 +422,11 @@ export default function HomePage() {
                     >
                       <span className="history-target">{scan.target}</span>
                       <span className={`scan-mode-badge ${scan.scanMode || "fast"}`}>
-                        {(scan.scanMode || "fast") === "deep" ? "🔬 Deep" : "⚡ Fast"}
+                        {(scan.scanMode || "fast") === "deep"
+                          ? "🔬 Deep"
+                          : (scan.scanMode || "fast") === "api"
+                            ? "API"
+                            : "⚡ Fast"}
                       </span>
                       <span className={`history-state ${scan.state}`}>
                         {scan.state}
@@ -323,3 +523,4 @@ export default function HomePage() {
     </>
   );
 }
+

@@ -28,8 +28,15 @@ async def main(target: str):
     print(f"{'='*65}\n")
 
     # Load konfigurasi dari environment/.env
-    from config import load_config
-    config = load_config(require_secrets=False)
+    try:
+        from config import load_config
+        config = load_config(require_secrets=False)
+        scan_config = config.scan
+    except (ImportError, Exception):
+        # Fallback mock config for minimal testing environments without dotenv
+        class MockScanConfig:
+            shodan_api_key = ""
+        scan_config = MockScanConfig()
 
     # Buat context minimal seperti yang digunakan pipeline asli
     work_dir = Path("/tmp/test_originip")
@@ -39,7 +46,7 @@ async def main(target: str):
         "scan_id":     "test-manual",
         "target":      target,
         "work_dir":    work_dir,
-        "config":      config.scan,
+        "config":      scan_config,
         "scan_mode":   "fast",
         "logger":      logger,
         "tool_errors": [],
@@ -79,17 +86,31 @@ async def main(target: str):
         is_cloudfront = info.get("is_cloudfront", False)
         methods       = ", ".join(info.get("methods", []))
         ptr           = info.get("ptr", "") or "-"
+        verification  = info.get("verification", {})
 
         if is_cloudfront:
             status = "☁️  CLOUDFRONT"
         elif is_cdn:
             status = "⚠️  CLOUDFLARE "
+        elif verification.get("verified", False):
+            status = "🎯 VERIFIED OR"
         else:
-            status = "✅ ORIGIN     "
+            status = "✅ CANDIDATE  "
 
         print(f"\n  [{status}] {ip}")
         print(f"    PTR     : {ptr}")
         print(f"    Methods : {methods}")
+        if verification:
+            print(f"    Active Verification:")
+            print(f"      - Verified  : {verification.get('verified')}")
+            print(f"      - Status    : {verification.get('status')}")
+            print(f"      - Score     : {verification.get('score')}/100")
+            if verification.get("title"):
+                print(f"      - Title     : '{verification.get('title')}'")
+            if verification.get("status_code"):
+                print(f"      - HTTP Stat : {verification.get('status_code')}")
+            if verification.get("error"):
+                print(f"      - Error     : {verification.get('error')}")
 
     # ── Ringkasan Kandidat Origin ──────────────────────────────────────────────
     print(f"\n{'='*65}")
@@ -97,11 +118,16 @@ async def main(target: str):
         print(f"  🎯 ORIGIN IP CANDIDATES (Terbaik → Terakhir):")
         print(f"{'─'*65}")
         for i, ip in enumerate(candidates, 1):
-            methods = ", ".join(details.get(ip, {}).get("methods", []))
-            ptr     = details.get(ip, {}).get("ptr", "") or "-"
-            print(f"  {i}. {ip}")
+            info = details.get(ip, {})
+            methods = ", ".join(info.get("methods", []))
+            ptr     = info.get("ptr", "") or "-"
+            verification = info.get("verification", {})
+            verified_mark = "🎯 [VERIFIED]" if verification.get("verified") else "✅ [CANDIDATE]"
+            print(f"  {i}. {ip}  {verified_mark}")
             print(f"     PTR     : {ptr}")
             print(f"     Methods : {methods}")
+            if verification:
+                print(f"     Score   : {verification.get('score')}/100 | Status: {verification.get('status')}")
             print()
 
         best = candidates[0]

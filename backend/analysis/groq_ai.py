@@ -182,6 +182,8 @@ class GroqAI:
             top_findings.append({
                 "title": finding.title,
                 "severity": finding.severity,
+                "confidence": getattr(finding, "confidence", "needs_manual_validation"),
+                "confidence_score": getattr(finding, "confidence_score", 40),
                 "affected": finding.affected[:2],
                 "source": finding.source,
                 "validated": getattr(finding, "validated", False),
@@ -246,6 +248,8 @@ class GroqAI:
             "top_findings": top_findings,
             "limitations": result.limitations[:8],
             "tool_errors": result.tool_errors[:6],
+            "scan_mode": getattr(result, "scan_mode", "fast"),
+            "tools_used": result.tools_used,
         }
         return json.dumps(ctx, indent=2, default=str)
 
@@ -274,11 +278,24 @@ Write 3 to 4 short paragraphs.
 """.strip()
 
     def _prompt_scope(self, result: AggregatedResult, ctx: str) -> str:
+        if getattr(result, "scan_mode", "") == "api":
+            tools_ran = "PentestBot API checks against operator-supplied API endpoints and payloads."
+            mode_requirement = (
+                "- Clearly state that infrastructure recon, DNS resolution, port scanning, web crawling, "
+                "Nuclei/Nikto vulnerability scanning, and TLS analysis were not executed in API-only mode."
+            )
+        else:
+            tools_ran = (
+                "subdomain discovery, DNS resolution, port scanning, service detection, HTTP probing, "
+                "technology fingerprinting, web discovery, vulnerability scanning (Nuclei/Nikto), TLS analysis."
+            )
+            mode_requirement = "- State which scanning phases were executed and what was covered."
+
         return f"""
 Write the Scope & Coverage section for an automated security assessment report.
 
 Target: {result.target}
-Tools ran: subdomain discovery, DNS resolution, port scanning, service detection, HTTP probing, technology fingerprinting, web discovery, vulnerability scanning (Nuclei/Nikto), TLS analysis.
+Tools ran: {tools_ran}
 Tool errors: {result.tool_errors[:8]}
 Limitations: {result.limitations[:8]}
 Observed indicators: {getattr(result, "observed_findings_count", result.total_findings)}
@@ -286,7 +303,7 @@ Excluded observations: {getattr(result, "excluded_findings_count", 0)}
 Scan duration: {int(result.scan_duration)} seconds
 
 Requirements:
-- State which scanning phases were executed and what was covered.
+{mode_requirement}
 - Note any tools that failed or produced partial results.
 - Explain what was excluded from the final findings set and why.
 - Clarify that this is an automated scan, not manual testing.
@@ -653,4 +670,3 @@ Rules:
 
     async def close(self) -> None:
         await self._client.aclose()
-

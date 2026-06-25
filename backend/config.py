@@ -145,6 +145,18 @@ class ScanConfig:
     enable_joomscan: bool      = False
     joomscan_timeout: int      = 300
 
+    # SQLMap
+    enable_sqlmap: bool        = False
+    sqlmap_timeout: int        = 1800
+
+    # Dalfox
+    enable_dalfox: bool        = False
+    dalfox_timeout: int        = 600
+    dalfox_request_timeout: int = 10
+    dalfox_workers: int        = 20
+    dalfox_max_targets_per_host: int = 30
+    dalfox_deep_scan: bool     = False
+
     # S3Scanner
     enable_s3scanner: bool     = False
     s3scanner_timeout: int     = 240
@@ -271,7 +283,7 @@ def load_config(env_file: str = ".env", require_secrets: bool = True) -> Config:
         enable_gobuster=_parse_bool(os.getenv("ENABLE_GOBUSTER", "true"), default=True),
         gobuster_timeout=int(os.getenv("GOBUSTER_TIMEOUT", "180")),
         enable_dirsearch=_parse_bool(os.getenv("ENABLE_DIRSEARCH", "false"), default=False),
-        dirsearch_timeout=int(os.getenv("DIRSEARCH_TIMEOUT", "180")),
+        dirsearch_timeout=int(os.getenv("DIRSEARCH_TIMEOUT", "240")),
         enable_fingerprint=_parse_bool(os.getenv("ENABLE_FINGERPRINT", "true"), default=True),
         whatweb_timeout=int(os.getenv("WHATWEB_TIMEOUT", "120")),
         wafw00f_timeout=int(os.getenv("WAFW00F_TIMEOUT", "60")),
@@ -287,8 +299,16 @@ def load_config(env_file: str = ".env", require_secrets: bool = True) -> Config:
         wpscan_timeout=int(os.getenv("WPSCAN_TIMEOUT", "300")),
         enable_joomscan=_parse_bool(os.getenv("ENABLE_JOOMSCAN", "false"), default=False),
         joomscan_timeout=int(os.getenv("JOOMSCAN_TIMEOUT", "300")),
+        enable_sqlmap=_parse_bool(os.getenv("ENABLE_SQLMAP", "false"), default=False),
+        sqlmap_timeout=int(os.getenv("SQLMAP_TIMEOUT", "600")),
+        enable_dalfox=_parse_bool(os.getenv("ENABLE_DALFOX", "false"), default=False),
+        dalfox_timeout=int(os.getenv("DALFOX_TIMEOUT", "600")),
+        dalfox_request_timeout=int(os.getenv("DALFOX_REQUEST_TIMEOUT", "10")),
+        dalfox_workers=int(os.getenv("DALFOX_WORKERS", "20")),
+        dalfox_max_targets_per_host=int(os.getenv("DALFOX_MAX_TARGETS_PER_HOST", "30")),
+        dalfox_deep_scan=_parse_bool(os.getenv("DALFOX_DEEP_SCAN", "false"), default=False),
         enable_s3scanner=_parse_bool(os.getenv("ENABLE_S3SCANNER", "false"), default=False),
-        s3scanner_timeout=int(os.getenv("S3SCANNER_TIMEOUT", "120")),
+        s3scanner_timeout=int(os.getenv("S3SCANNER_TIMEOUT", "240")),
         enable_sslyze=_parse_bool(os.getenv("ENABLE_SSLYZE", "true"), default=True),
         sslyze_timeout=int(os.getenv("SSLYZE_TIMEOUT", "180")),
         total_scan_timeout=int(os.getenv("SCAN_TIMEOUT", "3600")),

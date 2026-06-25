@@ -1,0 +1,16 @@
+GET /admin/dashboard?_rsc=5c339 HTTP/2
+Host: rafa.web.id
+Cookie: __Host-authjs.csrf-token=bedbd5a8b497d47c012d8535769fc4625caeb5fd9fa520df46f04cd95dc4e70e%7C3e9933e7b7637966f0335995ecce89fdf4f7aeb6e2a82f74b72189ca40115952; __Secure-authjs.callback-url=https%3A%2F%2Frafa.web.id%2Flogin; __Secure-authjs.session-token=eyJhbGciOiJkaXIiLCJlbmMiOiJBMjU2Q0JDLUhTNTEyIiwia2lkIjoiMWFiVjZoaE83NGotMmpGV1ZSNVJLMGhqQkNSalVLNUx3TFBaZ2VIUmEzWWdlNS02emF2TTFaWUNQT05QM01meGlDU0xXWVp1cEVzWFVXMkJ5aUsta2cifQ..0z877BYlQBiGyQd4_0lCvQ.GIFiWehef2UXRjmsHr106r8HIAH1zPciP6aZmI1q0xsfahGZHeEOK_5baEaeFvz4pOMeHbZdexGngy3QFjyHHaoGCwYxU-HVpYF_WXXNFSld2GPC87le-KwWGmpksng5CHXWXMS_sPyXT-j-IduHFqMtcSAL1HCW1sMj-DCJZX47TbxSKx0dushSh5q1EYt_0RJfNR_kp_S67XSZVibujS9x4Jp2_nESrX4vmn7oMXmEiBAnXk1MEcnWben8SjWt73gsg1r_qG82sSUbNVX8iw.G8ZylAzw8gMYGvcys09B7_Vyj3qiXCDiRnEAujy8U3g
+User-Agent: Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:150.0) Gecko/20100101 Firefox/150.0
+Accept: */*
+Accept-Language: en-US,en;q=0.9
+Accept-Encoding: gzip, deflate, br
+Referer: https://rafa.web.id/login
+Rsc: 1
+Next-Router-State-Tree: %5B%22%22%2C%7B%22children%22%3A%5B%22login%22%2C%7B%22children%22%3A%5B%22__PAGE__%22%2C%7B%7D%2Cnull%2Cnull%5D%7D%2Cnull%2Cnull%5D%7D%2Cnull%2Cnull%2Ctrue%5D
+Next-Url: /login
+Sec-Fetch-Dest: empty
+Sec-Fetch-Mode: cors
+Sec-Fetch-Site: same-origin
+Te: trailers
+

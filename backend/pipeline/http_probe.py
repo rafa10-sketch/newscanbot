@@ -141,6 +141,16 @@ class HttpProbeStage(BaseStage):
                         url = f"https://{sub}:{port}"
                 urls.append(url)
 
+        # Fallback CDN Bypass: Include direct origin IP URLs
+        active_origin_ip = self.ctx.get("active_origin_ip")
+        if active_origin_ip:
+            self.log.info(f"[HTTPProbe] Adding fallback CDN bypass probes for origin IP: {active_origin_ip}")
+            for port in port_list:
+                if port in self.HTTPS_PORTS:
+                    urls.append(f"https://{active_origin_ip}" if port == 443 else f"https://{active_origin_ip}:{port}")
+                elif port in self.HTTP_PORTS:
+                    urls.append(f"http://{active_origin_ip}" if port == 80 else f"http://{active_origin_ip}:{port}")
+
         seen: set[str] = set()
         out: list[str] = []
         for url in urls:
@@ -218,27 +228,38 @@ class HttpProbeStage(BaseStage):
         json_out = self.temp_file("httpx_output.json")
         httpx_binary = self.ctx.get("httpx_binary", "httpx")
 
+        cmd = [
+            httpx_binary,
+            "-list",
+            str(urls_file),
+            "-silent",
+            "-json",
+            "-status-code",
+            "-title",
+            "-tech-detect",
+            "-web-server",
+            "-follow-redirects",
+            "-threads",
+            str(cfg.httpx_threads),
+            "-timeout",
+            str(cfg.httpx_timeout),
+            "-rate-limit",
+            str(cfg.httpx_rate_limit),
+            "-o",
+            str(json_out),
+        ]
+
+        custom_cookies = self.ctx.get("custom_cookies")
+        custom_headers = self.ctx.get("custom_headers")
+        if custom_cookies:
+            cmd.extend(["-H", f"Cookie: {custom_cookies}"])
+        if custom_headers:
+            for header in str(custom_headers).splitlines():
+                if header.strip():
+                    cmd.extend(["-H", header.strip()])
+
         result = await self.runner.run(
-            cmd=[
-                httpx_binary,
-                "-list",
-                str(urls_file),
-                "-silent",
-                "-json",
-                "-status-code",
-                "-title",
-                "-tech-detect",
-                "-web-server",
-                "-follow-redirects",
-                "-threads",
-                str(cfg.httpx_threads),
-                "-timeout",
-                str(cfg.httpx_timeout),
-                "-rate-limit",
-                str(cfg.httpx_rate_limit),
-                "-o",
-                str(json_out),
-            ],
+            cmd=cmd,
             timeout=cfg.httpx_timeout * 20,
         )
         self.log_result(result)

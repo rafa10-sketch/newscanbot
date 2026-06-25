@@ -75,6 +75,90 @@ export interface LogEntry {
   message: string;
 }
 
+export interface ApiEvidenceObservation {
+  name: string;
+  method: string;
+  url: string;
+  authContext: string;
+  status: number;
+  expected: string;
+  result: "pass" | "fail" | "finding" | "blocked";
+  length: number;
+  jsonFields: string[];
+  blockedBy?: string | null;
+}
+
+export interface ApiEvidenceFinding {
+  title: string;
+  severity: string;
+  description: string;
+  affected: string[];
+  kind: string;
+  endpointName: string;
+  jsonFields: string[];
+  hasFinancialFields: boolean;
+  confidence?: "confirmed" | "probable" | "needs_manual_validation" | "blocked" | "informational";
+  confidenceScore?: number;
+  confidenceReason?: string;
+}
+
+export interface ApiEvidenceValidationItem {
+  title: string;
+  kind: string;
+  method: string;
+  url: string;
+  reason: string;
+  status?: number | null;
+}
+
+export interface ApiEvidenceTestCase {
+  name: string;
+  method: string;
+  url: string;
+  expected: string;
+  result: "pass" | "fail" | "finding" | "blocked";
+  statuses: number[];
+  jsonFields: string[];
+  contexts: Array<{
+    authContext: string;
+    status: number;
+    result: "pass" | "fail" | "finding" | "blocked";
+  }>;
+  summary: string;
+}
+
+export interface ApiEvidence {
+  scanId: string;
+  ready: boolean;
+  verdict?: "pass" | "needs_review" | "finding" | "blocked";
+  headline?: string;
+  counts: {
+    total: number;
+    pass: number;
+    fail: number;
+    finding: number;
+    blocked: number;
+  };
+  caseCounts?: {
+    total: number;
+    pass: number;
+    fail: number;
+    finding: number;
+    blocked: number;
+  };
+  testCases?: ApiEvidenceTestCase[];
+  observations: ApiEvidenceObservation[];
+  findings: ApiEvidenceFinding[];
+  validationQueue: ApiEvidenceValidationItem[];
+}
+
+export interface CreateScanOptions {
+  originIp?: string;
+  apiEndpoints?: string;
+  customHeaders?: string;
+  customCookies?: string;
+}
+
 async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
   const url = `${API_BASE}${path}`;
   
@@ -97,10 +181,21 @@ async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
   return res.json();
 }
 
-export async function createScan(target: string, scanMode: string = "fast"): Promise<ScanCreateResponse> {
+export async function createScan(
+  target: string,
+  scanMode: string = "fast",
+  options: CreateScanOptions = {}
+): Promise<ScanCreateResponse> {
   return apiFetch<ScanCreateResponse>("/api/scans", {
     method: "POST",
-    body: JSON.stringify({ target, scanMode }),
+    body: JSON.stringify({
+      target,
+      scanMode,
+      originIp: options.originIp,
+      apiEndpoints: options.apiEndpoints,
+      customHeaders: options.customHeaders,
+      customCookies: options.customCookies,
+    }),
   });
 }
 
@@ -119,6 +214,10 @@ export async function getScanLogs(
   after: number = 0
 ): Promise<{ entries: LogEntry[]; nextCursor: number }> {
   return apiFetch(`/api/scans/${scanId}/logs?after=${after}`);
+}
+
+export async function getApiEvidence(scanId: string): Promise<ApiEvidence> {
+  return apiFetch<ApiEvidence>(`/api/scans/${scanId}/api-evidence`);
 }
 
 export async function listScans(): Promise<{ scans: ScanListItem[] }> {
@@ -181,3 +280,18 @@ export async function downloadRawData(scanId: string): Promise<void> {
   a.remove();
   URL.revokeObjectURL(a.href);
 }
+
+export async function downloadApiEvidence(scanId: string): Promise<void> {
+  const evidence = await getApiEvidence(scanId);
+  const blob = new Blob([JSON.stringify(evidence, null, 2)], {
+    type: "application/json",
+  });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `api_evidence_summary_${scanId}.json`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(a.href);
+}
+

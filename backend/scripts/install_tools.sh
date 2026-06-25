@@ -123,6 +123,13 @@ install_go_tool "httpx"       "github.com/projectdiscovery/httpx/cmd/httpx"     
 install_go_tool "katana"      "github.com/projectdiscovery/katana/cmd/katana"              "focused web crawler"
 install_go_tool "gau"         "github.com/lc/gau/v2/cmd/gau"                               "historical URL discovery"
 install_go_tool "nuclei"      "github.com/projectdiscovery/nuclei/v3/cmd/nuclei"           "vulnerability scanner"
+install_go_tool "dalfox"      "github.com/hahwul/dalfox/v2"                                "XSS scanner"
+install_go_tool "s3scanner"   "github.com/sa7mon/S3Scanner"                                "S3 bucket exposure scanner"
+if [[ ! -f "/usr/local/bin/s3scanner" && -f "${GOPATH}/bin/S3Scanner" ]]; then
+    cp "${GOPATH}/bin/S3Scanner" /usr/local/bin/s3scanner
+    chmod +x /usr/local/bin/s3scanner
+    ok "S3Scanner installed → /usr/local/bin/s3scanner"
+fi
 
 if [[ -f "/usr/local/bin/httpx" ]]; then
     cp /usr/local/bin/httpx /usr/local/bin/pd-httpx

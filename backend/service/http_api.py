@@ -14,6 +14,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
@@ -38,6 +39,7 @@ STAGE_ORDER = [
     "Fingerprint",
     "WebDiscovery",
     "VulnScan",
+    "APIScan",
     "GitExposure",
     "TLSScan",
     "Aggregation",
@@ -57,6 +59,7 @@ STAGE_PROGRESS = {
     "Fingerprint": 58,
     "WebDiscovery": 65,
     "VulnScan": 76,
+    "APIScan": 80,
     "GitExposure": 82,
     "TLSScan": 87,
     "Aggregation": 90,
@@ -72,6 +75,7 @@ LOG_PATTERN = re.compile(
     r"^\[(?P<ts>[^\]]+)\]\s+\[(?P<level>[^\]]+)\]\s+\[[^\]]+\]\s+"
     r"(?:(?:\[(?P<stage>[^\]]+)\])\s*)?(?P<message>.*)$"
 )
+URL_PATTERN = re.compile(r"https?://[^\s'\"<>]+")
 
 
 # ── Request/Response models ──────────────────────────────────────────────────
@@ -81,6 +85,16 @@ class ScanRequest(BaseModel):
     scanMode: Optional[str] = "fast"
     userRef: Optional[str] = ""
     externalJobId: Optional[str] = ""
+    customCookies: Optional[str] = None
+    customHeaders: Optional[str] = None
+    authLoginUrl: Optional[str] = None
+    authLoginPayload: Optional[str] = None
+    authTokenJsonPath: Optional[str] = None
+    authHeaderTemplate: Optional[str] = None
+    originIp: Optional[str] = None
+    origin_ip: Optional[str] = None
+    apiEndpoints: Optional[str] = None
+    api_endpoints: Optional[str] = None
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -108,6 +122,372 @@ def _summary_from_json(raw: str | None) -> dict | None:
     except Exception:
         return None
     return value if isinstance(value, dict) else None
+
+
+SENSITIVE_QUERY_NAMES = {
+    "access_token",
+    "apikey",
+    "api_key",
+    "auth",
+    "key",
+    "secret",
+    "signature",
+    "token",
+}
+
+
+def _redact_url(raw_url: str) -> str:
+    parsed = urlparse(str(raw_url or ""))
+    if not parsed.query:
+        return str(raw_url or "")
+
+    redacted_pairs = []
+    for name, value in parse_qsl(parsed.query, keep_blank_values=True):
+        if name.lower() in SENSITIVE_QUERY_NAMES or "key" in name.lower() or "token" in name.lower():
+            redacted_pairs.append((name, "REDACTED"))
+        else:
+            redacted_pairs.append((name, value))
+    return urlunparse(parsed._replace(query=urlencode(redacted_pairs, doseq=True)))
+
+
+def _redact_sensitive_text(raw_text: Any) -> str:
+    text = str(raw_text or "")
+    return URL_PATTERN.sub(lambda match: _redact_url(match.group(0)), text)
+
+
+def _json_fields(body_excerpt: Any) -> list[str]:
+    try:
+        parsed = json.loads(str(body_excerpt or ""))
+    except Exception:
+        return []
+    if isinstance(parsed, dict):
+        return sorted(str(key) for key in parsed.keys())
+    return []
+
+
+NEGATIVE_CONTROL_HINTS = (
+    "negative control",
+    "invalid key",
+    "missing key",
+    "key swap",
+    "with balance key",
+    "with channel key",
+    "wrong merchant",
+    "merchant-scope",
+    "wrong key",
+    "wrong-purpose",
+)
+
+KEY_SWAP_HINTS = (
+    "key swap",
+    "with balance key",
+    "with channel key",
+    "wrong-purpose",
+)
+
+
+def _looks_like_negative_control(name: str) -> bool:
+    lowered = str(name or "").lower()
+    return any(hint in lowered for hint in NEGATIVE_CONTROL_HINTS)
+
+
+def _looks_like_key_swap(name: str) -> bool:
+    lowered = str(name or "").lower()
+    return any(hint in lowered for hint in KEY_SWAP_HINTS)
+
+
+def _api_observation_result(obs: dict) -> str:
+    status = int(obs.get("status", 0) or 0)
+    name = str(obs.get("name", "") or "")
+    excerpt = str(obs.get("body_excerpt", "") or "").lower()
+
+    if status == 403 and ("just a moment" in excerpt or "challenges.cloudflare.com" in excerpt):
+        return "blocked"
+    if _looks_like_negative_control(name):
+        return "finding" if 200 <= status < 300 else "pass"
+    return "pass" if 200 <= status < 300 else "fail"
+
+
+def _api_observation_expected(obs: dict) -> str:
+    name = str(obs.get("name", "") or "")
+    if _looks_like_negative_control(name):
+        return "Should be rejected"
+    return "Should succeed"
+
+
+def _api_case_result(observations: list[dict]) -> str:
+    results = {str(obs.get("result", "")) for obs in observations}
+    if "finding" in results:
+        return "finding"
+    if "blocked" in results:
+        return "blocked"
+    if "fail" in results:
+        return "fail"
+    return "pass"
+
+
+def _api_case_summary(case_name: str, result: str, statuses: list[int], json_fields: list[str]) -> str:
+    status_text = ", ".join(str(status) for status in sorted(set(statuses))) or "unknown"
+    is_negative = _looks_like_negative_control(case_name)
+    is_key_swap = _looks_like_key_swap(case_name)
+
+    if result == "blocked":
+        return "Request belum sampai aplikasi karena diblokir CDN/WAF. Validasi belum konklusif."
+    if result == "finding":
+        if is_key_swap:
+            return (
+                "Kandidat finding: endpoint menerima key dari workflow lain dan tetap mengembalikan data. "
+                f"HTTP {status_text}; fields: {', '.join(json_fields) if json_fields else 'n/a'}."
+            )
+        if not is_negative:
+            return (
+                "Kandidat finding: request berhasil tetapi response memicu indikator keamanan. "
+                f"HTTP {status_text}; fields: {', '.join(json_fields) if json_fields else 'n/a'}."
+            )
+        return (
+            "Kandidat finding: negative control diterima sebagai request sukses. "
+            f"HTTP {status_text}; fields: {', '.join(json_fields) if json_fields else 'n/a'}."
+        )
+    if is_negative:
+        return f"Aman untuk skenario ini: negative control ditolak sesuai ekspektasi. HTTP {status_text}."
+    if result == "pass":
+        return f"Request valid berhasil. HTTP {status_text}."
+    return f"Request valid tidak sesuai ekspektasi. HTTP {status_text}; perlu cek path, key, body, atau origin routing."
+
+
+def _api_build_test_cases(observations: list[dict], findings: list[dict]) -> list[dict]:
+    finding_names = {str(finding.get("endpointName") or "") for finding in findings}
+    finding_urls = {
+        str(url)
+        for finding in findings
+        for url in finding.get("_rawAffected", finding.get("affected", []))
+    }
+    grouped: dict[tuple[str, str, str], list[dict]] = {}
+
+    for obs in observations:
+        key = (
+            str(obs.get("name") or "Unnamed API check"),
+            str(obs.get("method") or "GET"),
+            str(obs.get("url") or ""),
+        )
+        grouped.setdefault(key, []).append(obs)
+
+    test_cases = []
+    for (name, method, url), items in grouped.items():
+        result = _api_case_result(items)
+        raw_urls = {str(item.get("_rawUrl") or item.get("url") or "") for item in items}
+        if name in finding_names or bool(raw_urls & finding_urls):
+            result = "finding"
+        statuses = [int(item.get("status", 0) or 0) for item in items]
+        fields = sorted({field for item in items for field in item.get("jsonFields", [])})
+        contexts = [
+            {
+                "authContext": item.get("authContext") or "",
+                "status": item.get("status", 0),
+                "result": item.get("result") or "fail",
+            }
+            for item in items
+        ]
+        test_cases.append({
+            "name": name,
+            "method": method,
+            "url": url,
+            "expected": _api_observation_expected({"name": name}),
+            "result": result,
+            "statuses": sorted(set(statuses)),
+            "jsonFields": fields,
+            "contexts": contexts,
+            "summary": _api_case_summary(name, result, statuses, fields),
+        })
+
+    order = {"finding": 0, "fail": 1, "blocked": 2, "pass": 3}
+    return sorted(test_cases, key=lambda item: (order.get(item["result"], 9), item["name"]))
+
+
+def _api_finding_confidence(extra: dict) -> tuple[str, int, str]:
+    kind = str(extra.get("kind") or "").lower()
+    similarity = float(extra.get("response_similarity", 0) or 0)
+    has_financial_fields = bool(extra.get("has_financial_fields"))
+    is_key_swap = bool(extra.get("is_key_swap"))
+
+    if kind == "api-negative-control-accepted":
+        if has_financial_fields or is_key_swap:
+            return (
+                "confirmed",
+                92,
+                "Negative control returned a successful business response with financial fields or key-swap evidence.",
+            )
+        return (
+            "probable",
+            78,
+            "Negative control returned HTTP success; business impact still needs manual validation.",
+        )
+
+    if kind == "api-invalid-auth-accepted":
+        if similarity >= 0.85:
+            return (
+                "confirmed",
+                90,
+                "Invalid authentication returned a successful response close to the authenticated response.",
+            )
+        return (
+            "probable",
+            76,
+            "Invalid authentication was accepted, but response similarity needs review.",
+        )
+
+    if kind == "api-signature-bypass-candidate":
+        if similarity >= 0.85:
+            return (
+                "confirmed",
+                88,
+                "Missing or invalid signature material returned a successful similar response.",
+            )
+        return (
+            "probable",
+            74,
+            "Signature enforcement appears weak, but manual replay is recommended.",
+        )
+
+    if kind == "api-idor-candidate":
+        if similarity >= 0.85:
+            return (
+                "probable",
+                72,
+                "Identifier tampering returned a successful similar response; object ownership needs confirmation.",
+            )
+        return (
+            "needs_manual_validation",
+            58,
+            "Identifier tampering returned success, but cross-object access is not confirmed.",
+        )
+
+    if kind == "api-sensitive-data":
+        return (
+            "probable",
+            72,
+            "Successful API response contains patterns consistent with sensitive data.",
+        )
+
+    return (
+        "needs_manual_validation",
+        50,
+        "Application-layer signal needs manual review.",
+    )
+
+
+def _api_evidence_from_raw(raw_entries: list[dict]) -> dict:
+    observations: list[dict] = []
+    findings: list[dict] = []
+    validation_queue: list[dict] = []
+
+    for entry in raw_entries:
+        if entry.get("tool_name") != "api-scan":
+            continue
+        try:
+            payload = json.loads(str(entry.get("stdout") or "{}"))
+        except Exception:
+            continue
+
+        for obs in payload.get("observations", []):
+            if not isinstance(obs, dict):
+                continue
+            status = int(obs.get("status", 0) or 0)
+            result = _api_observation_result(obs)
+            observations.append({
+                "name": obs.get("name") or "Unnamed API check",
+                "method": obs.get("method") or "GET",
+                "url": _redact_url(str(obs.get("url") or "")),
+                "_rawUrl": str(obs.get("url") or ""),
+                "authContext": obs.get("auth_context") or "authenticated",
+                "status": status,
+                "expected": _api_observation_expected(obs),
+                "result": result,
+                "length": obs.get("length", 0),
+                "jsonFields": _json_fields(obs.get("body_excerpt")),
+                "blockedBy": "Cloudflare" if result == "blocked" else None,
+            })
+
+        for finding in payload.get("findings", []):
+            if not isinstance(finding, dict):
+                continue
+            extra = finding.get("extra") if isinstance(finding.get("extra"), dict) else {}
+            raw_affected = [str(url) for url in finding.get("affected", [])]
+            confidence, confidence_score, confidence_reason = _api_finding_confidence(extra)
+            findings.append({
+                "title": finding.get("title") or "API Finding",
+                "severity": finding.get("severity") or "info",
+                "description": _redact_sensitive_text(finding.get("description")),
+                "affected": [_redact_url(url) for url in raw_affected],
+                "_rawAffected": raw_affected,
+                "kind": extra.get("kind") or "",
+                "endpointName": extra.get("endpoint_name") or "",
+                "jsonFields": extra.get("json_fields") or [],
+                "hasFinancialFields": bool(extra.get("has_financial_fields")),
+                "confidence": confidence,
+                "confidenceScore": confidence_score,
+                "confidenceReason": confidence_reason,
+            })
+
+        for item in payload.get("validation_queue", []):
+            if not isinstance(item, dict):
+                continue
+            validation_queue.append({
+                "title": item.get("title") or "Manual validation queued",
+                "kind": item.get("kind") or "",
+                "method": item.get("method") or "",
+                "url": _redact_url(str(item.get("url") or "")),
+                "reason": item.get("reason") or "",
+                "status": (item.get("evidence") or {}).get("status") if isinstance(item.get("evidence"), dict) else None,
+            })
+
+    counts = {
+        "total": len(observations),
+        "pass": sum(1 for obs in observations if obs["result"] == "pass"),
+        "fail": sum(1 for obs in observations if obs["result"] == "fail"),
+        "finding": sum(1 for obs in observations if obs["result"] == "finding"),
+        "blocked": sum(1 for obs in observations if obs["result"] == "blocked"),
+    }
+    test_cases = _api_build_test_cases(observations, findings)
+    case_counts = {
+        "total": len(test_cases),
+        "pass": sum(1 for item in test_cases if item["result"] == "pass"),
+        "fail": sum(1 for item in test_cases if item["result"] == "fail"),
+        "finding": sum(1 for item in test_cases if item["result"] == "finding"),
+        "blocked": sum(1 for item in test_cases if item["result"] == "blocked"),
+    }
+    if case_counts["finding"]:
+        verdict = "finding"
+        headline = f"{case_counts['finding']} kandidat finding perlu divalidasi manual."
+    elif case_counts["fail"]:
+        verdict = "needs_review"
+        headline = f"{case_counts['fail']} test valid gagal dan perlu dicek."
+    elif case_counts["blocked"]:
+        verdict = "blocked"
+        headline = f"{case_counts['blocked']} test diblokir sebelum mencapai aplikasi."
+    else:
+        verdict = "pass"
+        headline = "Semua kontrol yang diuji berjalan sesuai ekspektasi."
+
+    public_observations = [
+        {key: value for key, value in obs.items() if not key.startswith("_")}
+        for obs in observations
+    ]
+    public_findings = [
+        {key: value for key, value in finding.items() if not key.startswith("_")}
+        for finding in findings
+    ]
+
+    return {
+        "verdict": verdict,
+        "headline": headline,
+        "counts": counts,
+        "caseCounts": case_counts,
+        "testCases": test_cases,
+        "observations": public_observations,
+        "findings": public_findings,
+        "validationQueue": validation_queue,
+    }
 
 
 # ── App Factory ──────────────────────────────────────────────────────────────
@@ -187,6 +567,14 @@ def create_app(
                 user_id=mapped_user_id,
                 raw_target=target,
                 scan_mode=scan_mode,
+                custom_cookies=body.customCookies,
+                custom_headers=body.customHeaders,
+                auth_login_url=body.authLoginUrl,
+                auth_login_payload=body.authLoginPayload,
+                auth_token_json_path=body.authTokenJsonPath,
+                auth_header_template=body.authHeaderTemplate,
+                origin_ip=body.originIp or body.origin_ip,
+                api_endpoints=body.apiEndpoints or body.api_endpoints,
             )
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error))
@@ -362,6 +750,39 @@ def create_app(
             filename=file_path.name,
         )
 
+    @app.get("/api/scans/{scan_id}/api-evidence", dependencies=[Depends(verify_token)])
+    async def get_scan_api_evidence(scan_id: str):
+        scan = await database.get_scan(scan_id)
+        if not scan:
+            raise HTTPException(status_code=404, detail="Scan not found.")
+
+        raw_path = scan.get("raw_path")
+        if not raw_path:
+            return {
+                "scanId": scan_id,
+                "ready": False,
+                "counts": {"total": 0, "pass": 0, "fail": 0, "finding": 0, "blocked": 0},
+                "observations": [],
+                "findings": [],
+                "validationQueue": [],
+            }
+
+        file_path = Path(str(raw_path))
+        if not file_path.exists():
+            raise HTTPException(status_code=404, detail="Raw data file is missing.")
+
+        try:
+            raw_entries = json.loads(file_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Could not parse raw API evidence: {exc}")
+
+        evidence = _api_evidence_from_raw(raw_entries if isinstance(raw_entries, list) else [])
+        return {
+            "scanId": scan_id,
+            "ready": True,
+            **evidence,
+        }
+
     # ── List Recent Scans ────────────────────────────────────────────────
 
     @app.get("/api/scans", dependencies=[Depends(verify_token)])
@@ -477,3 +898,4 @@ def _normalize_log_timestamp(raw: str) -> str | None:
     except ValueError:
         return raw
     return parsed.replace(tzinfo=timezone.utc).isoformat()
+

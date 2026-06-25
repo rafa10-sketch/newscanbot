@@ -28,11 +28,19 @@ RUN go install github.com/projectdiscovery/httpx/cmd/httpx@latest
 RUN go install github.com/projectdiscovery/katana/cmd/katana@latest
 RUN go install github.com/lc/gau/v2/cmd/gau@latest || echo "Warning: gau build failed (non-fatal)"
 RUN go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
+RUN go install github.com/hahwul/dalfox/v2@latest || echo "Warning: Dalfox build failed (non-fatal)"
+RUN go install github.com/sa7mon/S3Scanner@latest || echo "Warning: S3Scanner build failed (non-fatal)"
 # Web discovery & fingerprinting (Go)
 RUN go install github.com/OJ/gobuster/v3@latest
 RUN go install github.com/rverton/webanalyze/cmd/webanalyze@latest
 # Amass (optional — heavy but installed for availability)
 RUN go install github.com/owasp-amass/amass/v4/...@latest || echo "Warning: Amass build failed (non-fatal)"
+RUN for bin in gau dalfox S3Scanner amass; do \
+      if [ ! -x "/go/bin/$bin" ]; then \
+        printf '#!/bin/sh\necho "%s not available in this image" >&2\nexit 127\n' "$bin" > "/go/bin/$bin"; \
+        chmod +x "/go/bin/$bin"; \
+      fi; \
+    done
 
 # ── Runtime Image ────────────────────────────────────────────────────────────
 FROM python:3.11-slim-bookworm
@@ -51,6 +59,7 @@ ENV PENTESTBOT_REPORTS_DIR=/app/reports
 ENV PENTESTBOT_WORK_DIR=/app/data/work
 ENV PENTESTBOT_DB_PATH=/app/data/pentestbot.db
 ENV NUCLEI_TEMPLATES=/home/pentestbot/.config/nuclei/templates
+ENV MAX_OSSL_FAIL=5
 
 # ── System Dependencies ──────────────────────────────────────────────────────
 RUN apt-get update -qq \
@@ -58,7 +67,7 @@ RUN apt-get update -qq \
     bsdextrautils ca-certificates curl dnsutils git gosu jq \
     libpcap-dev libssl-dev \
     libjson-perl libjson-xs-perl libnet-ssleay-perl libxml-writer-perl \
-    nmap perl procps wget \
+    nmap perl procps wget sqlmap \
     # Ruby for WhatWeb and WPScan
     ruby ruby-dev build-essential \
   # Joomscan dependencies (Perl modules)
@@ -78,11 +87,10 @@ COPY --from=go-builder /go/bin/katana /usr/local/bin/
 COPY --from=go-builder /go/bin/nuclei /usr/local/bin/
 COPY --from=go-builder /go/bin/gobuster /usr/local/bin/
 COPY --from=go-builder /go/bin/webanalyze /usr/local/bin/
-# gau + Amass (may not exist if build failed — soft-copy to avoid failure)
-COPY --from=go-builder /go/bin/ /tmp/go-bins/
-RUN cp /tmp/go-bins/gau /usr/local/bin/gau 2>/dev/null || echo "gau not available" \
-  && cp /tmp/go-bins/amass /usr/local/bin/amass 2>/dev/null || echo "Amass not available" \
-  && rm -rf /tmp/go-bins
+COPY --from=go-builder /go/bin/gau /usr/local/bin/gau
+COPY --from=go-builder /go/bin/dalfox /usr/local/bin/dalfox
+COPY --from=go-builder /go/bin/S3Scanner /usr/local/bin/s3scanner
+COPY --from=go-builder /go/bin/amass /usr/local/bin/amass
 
 # ── testssl.sh ───────────────────────────────────────────────────────────────
 RUN git clone --depth 1 https://github.com/drwetter/testssl.sh.git /opt/testssl.sh \
@@ -112,6 +120,7 @@ RUN git clone --depth 1 https://github.com/OWASP/joomscan.git /opt/joomscan \
 
 # ── Dirsearch (Python) ─────────────────────────────────────────────────────
 RUN git clone --depth 1 https://github.com/maurosoria/dirsearch.git /opt/dirsearch \
+  && pip install --no-cache-dir -r /opt/dirsearch/requirements.txt defusedcsv 2>/dev/null || true \
   && ln -sf /opt/dirsearch/dirsearch.py /usr/local/bin/dirsearch \
   && chmod +x /opt/dirsearch/dirsearch.py
 

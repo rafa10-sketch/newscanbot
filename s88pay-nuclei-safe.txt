@@ -1,0 +1,18 @@
+[waf-detect:nginxgeneric] [http] [info] https://api-staging.s88pay.co
+[tls-version] [ssl] [info] api-staging.s88pay.co:443 ["tls12"]
+[tls-version] [ssl] [info] api-staging.s88pay.co:443 ["tls13"]
+[web-config] [http] [info] https://api-staging.s88pay.co/web.config
+[xss-deprecated-header] [http] [info] https://api-staging.s88pay.co ["1; mode=block"]
+[http-missing-security-headers:x-frame-options] [http] [info] https://api-staging.s88pay.co
+[http-missing-security-headers:x-permitted-cross-domain-policies] [http] [info] https://api-staging.s88pay.co
+[http-missing-security-headers:referrer-policy] [http] [info] https://api-staging.s88pay.co
+[http-missing-security-headers:cross-origin-embedder-policy] [http] [info] https://api-staging.s88pay.co
+[http-missing-security-headers:cross-origin-opener-policy] [http] [info] https://api-staging.s88pay.co
+[http-missing-security-headers:cross-origin-resource-policy] [http] [info] https://api-staging.s88pay.co
+[http-missing-security-headers:content-security-policy] [http] [info] https://api-staging.s88pay.co
+[http-missing-security-headers:permissions-policy] [http] [info] https://api-staging.s88pay.co
+[tech-detect:nginx] [http] [info] https://api-staging.s88pay.co
+[ds-store-file] [http] [info] https://api-staging.s88pay.co/.DS_Store
+[ssl-issuer] [ssl] [info] api-staging.s88pay.co:443 ["ZeroSSL GmbH"]
+[ssl-dns-names] [ssl] [info] api-staging.s88pay.co:443 ["*.s88pay.co","s88pay.co"]
+[wildcard-tls] [ssl] [info] api-staging.s88pay.co:443 ["SAN: [*.s88pay.co s88pay.co]","CN: *.s88pay.co"]

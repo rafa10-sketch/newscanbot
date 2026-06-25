@@ -53,6 +53,14 @@ class ScanJob:
     current_stage: str       = "Queued"
     error: Optional[str]     = None
     pdf_path: Optional[Path] = None
+    custom_cookies: Optional[str] = None
+    custom_headers: Optional[str] = None
+    auth_login_url: Optional[str] = None
+    auth_login_payload: Optional[str] = None
+    auth_token_json_path: Optional[str] = None
+    auth_header_template: Optional[str] = None
+    origin_ip: Optional[str] = None
+    api_endpoints: Optional[str] = None
 
     def duration_seconds(self) -> float:
         if not self.started_at:
@@ -97,6 +105,33 @@ def _is_private_ip(ip: str) -> bool:
         return ipaddress.ip_address(ip).is_private
     except ValueError:
         return False
+
+
+def validate_origin_ip(raw: Optional[str]) -> tuple[bool, Optional[str], str]:
+    """Validate an authorized manual origin IP supplied by the operator."""
+    if raw is None:
+        return True, None, ""
+
+    cleaned = raw.strip()
+    if not cleaned:
+        return True, None, ""
+
+    try:
+        addr = ipaddress.ip_address(cleaned)
+    except ValueError:
+        return False, cleaned, f"Origin IP '{cleaned}' is not a valid IP address."
+
+    if (
+        addr.is_private
+        or addr.is_loopback
+        or addr.is_link_local
+        or addr.is_multicast
+        or addr.is_reserved
+        or addr.is_unspecified
+    ):
+        return False, cleaned, "Origin IP must be a public routable IP address."
+
+    return True, str(addr), ""
 
 
 def validate_target(raw: str) -> tuple[bool, str, str]:
@@ -177,6 +212,14 @@ class JobManager:
         raw_target: str,
         on_progress: Optional[ProgressCallback] = None,
         scan_mode: str = "fast",
+        custom_cookies: Optional[str] = None,
+        custom_headers: Optional[str] = None,
+        auth_login_url: Optional[str] = None,
+        auth_login_payload: Optional[str] = None,
+        auth_token_json_path: Optional[str] = None,
+        auth_header_template: Optional[str] = None,
+        origin_ip: Optional[str] = None,
+        api_endpoints: Optional[str] = None,
     ) -> ScanJob:
         """
         Validate target and enqueue a scan.
@@ -187,12 +230,35 @@ class JobManager:
         if not valid:
             raise ValueError(err)
 
+        valid_origin, cleaned_origin_ip, origin_err = validate_origin_ip(origin_ip)
+        if not valid_origin:
+            raise ValueError(origin_err)
+
         mode = ScanMode.from_str(scan_mode)
         scan_id = make_scan_id(target)
-        job = ScanJob(scan_id=scan_id, user_id=user_id, target=target, scan_mode=mode.value)
+        job = ScanJob(
+            scan_id=scan_id,
+            user_id=user_id,
+            target=target,
+            scan_mode=mode.value,
+            custom_cookies=custom_cookies,
+            custom_headers=custom_headers,
+            auth_login_url=auth_login_url,
+            auth_login_payload=auth_login_payload,
+            auth_token_json_path=auth_token_json_path,
+            auth_header_template=auth_header_template,
+            origin_ip=cleaned_origin_ip,
+            api_endpoints=api_endpoints,
+        )
         self._jobs[scan_id] = job
 
-        await self.db.create_scan(scan_id, user_id, target, scan_mode=mode.value)
+        await self.db.create_scan(
+            scan_id, user_id, target,
+            scan_mode=mode.value,
+            auth_login_url=auth_login_url,
+            auth_login_payload=auth_login_payload,
+            auth_token_json_path=auth_token_json_path,
+        )
         await self.db.audit("scan_submitted", user_id=user_id, scan_id=scan_id, detail=f"{target} (mode={mode.value})")
 
         coro = self._execute(job, on_progress)
@@ -222,6 +288,138 @@ class JobManager:
         
         await self.db.update_scan_state(scan_id, "cancelled")
         return True
+
+    async def _perform_dynamic_login(
+        self,
+        job: ScanJob,
+        scan_log: ScanLogger,
+    ) -> tuple[Optional[str], Optional[str]]:
+        """
+        Executes an HTTP request to authenticate dynamically, extracting cookies and JSON token.
+        Returns a tuple of (extracted_cookies_string, extracted_header_string).
+        """
+        import httpx
+        import urllib.parse
+        from typing import Any
+
+        url = str(job.auth_login_url).strip()
+        scan_log.info(f"[Auth] Initializing dynamic login to {url}...")
+
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "application/json, text/plain, */*",
+        }
+
+        # Determine payload
+        json_data = None
+        form_data = None
+        content_data = None
+
+        if job.auth_login_payload:
+            payload_str = str(job.auth_login_payload).strip()
+            if payload_str.startswith("{") or payload_str.startswith("["):
+                try:
+                    json_data = json.loads(payload_str)
+                    headers["Content-Type"] = "application/json"
+                    scan_log.info("[Auth] Payload detected as JSON.")
+                except Exception as je:
+                    scan_log.warning(f"[Auth] Payload starts with brace but failed to parse as JSON: {je}. Sending raw.")
+                    content_data = payload_str
+            else:
+                try:
+                    parsed_qs = urllib.parse.parse_qs(payload_str, keep_blank_values=True)
+                    form_data = {k: v[0] for k, v in parsed_qs.items()}
+                    headers["Content-Type"] = "application/x-www-form-urlencoded"
+                    scan_log.info("[Auth] Payload detected as Form URL-encoded.")
+                except Exception:
+                    content_data = payload_str
+
+        method = "POST" if (job.auth_login_payload or "login" in url.lower()) else "GET"
+
+        extracted_cookies = None
+        extracted_header = None
+
+        try:
+            # We use verify=False to prevent SSL certificate issues on dev environments
+            async with httpx.AsyncClient(verify=False, follow_redirects=True) as client:
+                scan_log.info(f"[Auth] Sending {method} request to {url}...")
+                response = await client.request(
+                    method=method,
+                    url=url,
+                    json=json_data,
+                    data=form_data,
+                    content=content_data,
+                    headers=headers,
+                    timeout=15.0
+                )
+                
+                scan_log.info(f"[Auth] Login response received. HTTP Code: {response.status_code}")
+
+                # 1. Extract cookies
+                cookies = response.cookies
+                if cookies:
+                    cookie_parts = [f"{k}={v}" for k, v in cookies.items()]
+                    extracted_cookies = "; ".join(cookie_parts)
+                    scan_log.info(f"[Auth] Successfully extracted {len(cookies)} cookies.")
+
+                # 2. Extract Token
+                token = None
+                
+                # Check JSON path traversal helper
+                def get_json_value(data: Any, path: str) -> Any:
+                    parts = path.strip().split(".")
+                    curr = data
+                    for part in parts:
+                        if isinstance(curr, dict) and part in curr:
+                            curr = curr[part]
+                        elif isinstance(curr, list):
+                            try:
+                                idx = int(part)
+                                curr = curr[idx]
+                            except (ValueError, IndexError):
+                                return None
+                        else:
+                            return None
+                    return curr
+
+                # If path specified
+                if job.auth_token_json_path:
+                    path = str(job.auth_token_json_path).strip()
+                    try:
+                        resp_json = response.json()
+                        token_val = get_json_value(resp_json, path)
+                        if token_val:
+                            token = str(token_val)
+                            scan_log.info(f"[Auth] Extracted token from path '{path}': {token[:10]}...")
+                        else:
+                            scan_log.warning(f"[Auth] Path '{path}' not found in response JSON: {resp_json}")
+                    except Exception as e:
+                        scan_log.warning(f"[Auth] JSON parsing / token path traversal failed: {e}")
+                else:
+                    # Try autodetecting token if response is JSON
+                    try:
+                        resp_json = response.json()
+                        for key in ["token", "access_token", "accessToken", "jwt", "id_token"]:
+                            token_val = get_json_value(resp_json, key)
+                            if token_val and isinstance(token_val, str):
+                                token = token_val
+                                scan_log.info(f"[Auth] Autodetected token in key '{key}': {token[:10]}...")
+                                break
+                    except Exception:
+                        pass
+
+                if token:
+                    template = str(job.auth_header_template or "Authorization: Bearer {token}").strip()
+                    if "{token}" in template:
+                        extracted_header = template.replace("{token}", token)
+                    else:
+                        extracted_header = f"{template}: {token}" if ":" not in template else template
+                    scan_log.info(f"[Auth] Constructed header: {extracted_header.split(':', 1)[0]}: ******")
+        except Exception as conn_err:
+            scan_log.error(f"[Auth] Connection or request error during login: {conn_err}")
+            raise conn_err
+
+        return extracted_cookies, extracted_header
 
     def get_job(self, scan_id: str) -> Optional[ScanJob]:
         return self._jobs.get(scan_id)
@@ -255,24 +453,26 @@ class JobManager:
         from pipeline.fingerprint import FingerprintStage
         from pipeline.web_discovery import WebDiscoveryStage
         from pipeline.vuln_scan  import VulnScanStage
+        from pipeline.api_scan   import APIScanStage
         from pipeline.tls_scan   import TLSScanStage
-        from pipeline.git_exposure import GitExposureStage
         from analysis.result_aggregator import ResultAggregator
         from analysis.normalizer        import Normalizer
-        from analysis.ai_engine         import AIEngine
-        from report.report_builder      import ReportBuilder
-        from report.pdf_generator       import PDFGenerator
 
         job.state      = JobState.RUNNING
         job.started_at = datetime.utcnow()
         await self.db.update_scan_state(job.scan_id, "running")
 
         # Pre-populate all stages as queued so the UI shows them immediately
-        all_stages = [
-            "Recon", "Resolver", "OriginIP", "PortScan", "ServiceScan",
-            "HTTPProbe", "Fingerprint", "WebDiscovery", "TLSScan",
-            "VulnScan", "GitExposure", "Aggregation", "AIAnalysis", "Report"
-        ]
+        if ScanMode.from_str(job.scan_mode) == ScanMode.API:
+            all_stages = ["APIScan", "Aggregation", "Done"]
+        else:
+            all_stages = [
+                "Recon", "Resolver", "OriginIP", "PortScan", "ServiceScan",
+                "HTTPProbe", "Fingerprint", "WebDiscovery", "TLSScan",
+                "VulnScan", "Aggregation", "AIAnalysis", "Report"
+            ]
+            if job.api_endpoints:
+                all_stages.insert(all_stages.index("Aggregation"), "APIScan")
         for stage in all_stages:
             await self.db.upsert_stage(job.scan_id, stage, "queued")
 
@@ -327,125 +527,227 @@ class JobManager:
             "tool_errors":  [],
             "limitations":  [],
             "stage_errors": {},
+            "custom_cookies": job.custom_cookies,
+            "custom_headers": job.custom_headers,
+            "api_endpoints":  job.api_endpoints,
         }
 
+        active_origin_ip = None
+
         try:
-            # ── Stage 1: Recon — Subdomain Discovery ─────────────────────
-            await notify("Recon", f"Discovering subdomains for {job.target}...")
-            recon = ReconStage(ctx)
-            recon_timeout = max(
-                profiled_config.subfinder_timeout,
-                profiled_config.assetfinder_timeout,
-                profiled_config.amass_timeout if profiled_config.enable_amass else 0
-            ) + 60
-            await asyncio.wait_for(recon.run(), timeout=recon_timeout)
-            await finalize_stage("Recon", len(ctx.get("subdomains", [])))
-
-            # ── Stage 2: Resolver — DNS Resolution ───────────────────────
-            await notify("Resolver", f"Resolving {len(ctx.get('subdomains', []))} hosts...")
-            resolver = ResolverStage(ctx)
-            await asyncio.wait_for(resolver.run(), timeout=120)
-            await finalize_stage("Resolver", len(ctx.get("resolved_hosts", {})))
-
-            # ── Stage 3: Origin IP ────────────────────────────────────────
-            await notify("OriginIP", "Detecting origin IPs / CDN bypass...")
-            originip = OriginIPStage(ctx)
-            await asyncio.wait_for(originip.run(), timeout=90)
-            await finalize_stage("OriginIP")
-
-            portscan_done = asyncio.Event()
-
-            # ── Split Pipeline: Infrastructure vs Web ─────────────────────
-            async def run_infra_pipeline():
-                # ── Stage 4: Port Scanning
-                host_count = len(ctx.get("live_ips", [ctx["target"]]))
-                await notify("PortScan", f"Scanning ports on {host_count} hosts...")
-                portscan = PortScanStage(ctx)
-                await asyncio.wait_for(portscan.run(), timeout=profiled_config.naabu_timeout)
-                await finalize_stage("PortScan", len(ctx.get("open_ports", [])))
-                
-                # Signal that PortScan is done so Web pipeline can start
-                portscan_done.set()
-
-                # ── Stage 5: Service Detection
-                port_count = len(ctx.get("open_ports", []))
-                await notify("ServiceScan", f"Detecting services on {port_count} open ports...")
-                service_scan = ServiceScanStage(ctx)
-                await asyncio.wait_for(service_scan.run(), timeout=profiled_config.nmap_timeout)
-                await finalize_stage("ServiceScan", len(ctx.get("services", [])))
-
-            async def run_web_pipeline():
-                # Wait for PortScan to find open ports before probing
-                await portscan_done.wait()
-                
-                # ── Stage 6: HTTP Probing
-                await notify("HTTPProbe", "Probing HTTP/HTTPS endpoints...")
-                http_probe = HttpProbeStage(ctx)
-                http_probe_timeout = max(
-                    profiled_config.httpx_timeout * 20 + 30,
-                    profiled_config.stage_timeout,
+            if mode == ScanMode.API:
+                ctx["subdomains"] = [job.target]
+                ctx.setdefault("limitations", []).append(
+                    "API-only mode skipped infrastructure, web discovery, vulnerability, and TLS stages."
                 )
-                await asyncio.wait_for(http_probe.run(), timeout=http_probe_timeout)
-                await finalize_stage("HTTPProbe", len(ctx.get("live_hosts", [])))
+                if job.origin_ip:
+                    active_origin_ip = job.origin_ip
+                    ctx["active_origin_ip"] = active_origin_ip
+                    ctx.setdefault("limitations", []).append(
+                        "API-only mode used an operator-supplied origin IP for authorized testing."
+                    )
+                    _inject_hosts_entry(job.target, active_origin_ip, scan_log)
+                await notify("APIScan", "Running API-only endpoint checks...")
+                api_scan = APIScanStage(ctx)
+                await asyncio.wait_for(api_scan.run(), timeout=profiled_config.stage_timeout)
+                await finalize_stage("APIScan", ctx.get("api_findings_count", 0))
+            else:
+                # ── Stage 1: Recon — Subdomain Discovery ─────────────────────
+                await notify("Recon", f"Discovering subdomains for {job.target}...")
+                recon = ReconStage(ctx)
+                recon_timeout = max(
+                    profiled_config.subfinder_timeout,
+                    profiled_config.assetfinder_timeout,
+                    profiled_config.amass_timeout if profiled_config.enable_amass else 0
+                ) + 60
+                await asyncio.wait_for(recon.run(), timeout=recon_timeout)
+                await finalize_stage("Recon", len(ctx.get("subdomains", [])))
 
-                # ── Concurrent Web Stages (7, 8, 10) ──────────────────────
-                async def run_fingerprint():
-                    await notify("Fingerprint", "Running fingerprinting (WhatWeb, Wafw00f, Webanalyze)...")
-                    fingerprint = FingerprintStage(ctx)
-                    await asyncio.wait_for(fingerprint.run(), timeout=profiled_config.stage_timeout)
-                    await finalize_stage("Fingerprint", len(ctx.get("fingerprint_technologies", [])))
+                # ── Stage 2: Resolver — DNS Resolution ───────────────────────
+                await notify("Resolver", f"Resolving {len(ctx.get('subdomains', []))} hosts...")
+                resolver = ResolverStage(ctx)
+                await asyncio.wait_for(resolver.run(), timeout=120)
+                await finalize_stage("Resolver", len(ctx.get("resolved_hosts", {})))
 
-                async def run_web_discovery():
-                    await notify("WebDiscovery", "Expanding web attack surface from live endpoints...")
-                    web_discovery = WebDiscoveryStage(ctx)
-                    web_discovery_timeout = max(
-                        profiled_config.katana_timeout + profiled_config.gau_timeout + 30,
+                # ── Optional: Dynamic Login & Session Handler ──────────────────
+                if job.auth_login_url:
+                    await notify("System", f"Attempting dynamic login to {job.auth_login_url}...")
+                    try:
+                        extracted_cookies, extracted_header = await self._perform_dynamic_login(job, scan_log)
+                        if extracted_cookies:
+                            current_cookies = ctx.get("custom_cookies") or ""
+                            if current_cookies:
+                                ctx["custom_cookies"] = f"{current_cookies.rstrip(';')}; {extracted_cookies}"
+                            else:
+                                ctx["custom_cookies"] = extracted_cookies
+                            scan_log.info("[Auth] Merged dynamic cookies into scan session.")
+                        
+                        if extracted_header:
+                            current_headers = ctx.get("custom_headers") or ""
+                            if current_headers:
+                                ctx["custom_headers"] = f"{current_headers}\n{extracted_header}"
+                            else:
+                                ctx["custom_headers"] = extracted_header
+                            scan_log.info(f"[Auth] Injected dynamic auth header: {extracted_header.split(':', 1)[0]}: ******")
+                        
+                        if not extracted_cookies and not extracted_header:
+                            scan_log.warning("[Auth] Dynamic login finished but no cookies or token could be extracted.")
+                    except Exception as login_err:
+                        scan_log.error(f"[Auth] Dynamic login failed: {login_err}")
+                        ctx["tool_errors"].append(f"Dynamic Login failed: {login_err}")
+
+                # ── Stage 3: Origin IP ────────────────────────────────────────
+                await notify("OriginIP", "Detecting origin IPs / CDN bypass...")
+                originip = OriginIPStage(ctx)
+                await asyncio.wait_for(originip.run(), timeout=300)
+                await finalize_stage("OriginIP")
+
+                # ── CDN Bypass: Inject origin IP into /etc/hosts ─────────────
+                # If user supplied a manual origin IP, use it directly.
+                # Otherwise, use the best auto-discovered verified candidate.
+                if job.origin_ip:
+                    active_origin_ip = job.origin_ip
+                    existing_candidates = ctx.get("origin_candidates", [])
+                    ctx["origin_candidates"] = list(dict.fromkeys([job.origin_ip] + existing_candidates))
+                    origin_data = ctx.setdefault("origin_data", {})
+                    origin_details = origin_data.setdefault("details", {})
+                    origin_details[job.origin_ip] = {
+                        "methods": ["manual_authorized_origin_ip"],
+                        "ptr": "",
+                        "is_cdn": False,
+                        "is_cloudfront": False,
+                        "verification": {
+                            "verified": True,
+                            "status": "manual_authorized",
+                            "score": 100,
+                        },
+                    }
+                    origin_data["manual_origin_ip"] = job.origin_ip
+                    origin_data["origin_candidates"] = ctx["origin_candidates"]
+                    origin_data["all_ips"] = list(dict.fromkeys(origin_data.get("all_ips", []) + [job.origin_ip]))
+                    scan_log.info(f"[System] Manual authorized origin IP provided: {job.origin_ip}")
+                elif ctx.get("origin_candidates"):
+                    origin_details = ctx.get("origin_data", {}).get("details", {})
+                    
+                    # Log verification debug details for the candidates
+                    for candidate_ip in ctx["origin_candidates"]:
+                        verification = origin_details.get(candidate_ip, {}).get("verification", {})
+                        scan_log.info(f"[System] Candidate {candidate_ip} verification: {verification}")
+                    
+                    # 1. Try to find a strictly verified candidate
+                    for candidate_ip in ctx["origin_candidates"]:
+                        verification = origin_details.get(candidate_ip, {}).get("verification", {})
+                        if verification.get("verified"):
+                            active_origin_ip = candidate_ip
+                            break
+                    
+                    # 2. Fallback to the best unverified candidate if no verified one is found
+                    if not active_origin_ip and len(ctx["origin_candidates"]) > 0:
+                        best_candidate = ctx["origin_candidates"][0]
+                        scan_log.warning(f"[System] Strict verification failed. Falling back to best candidate: {best_candidate}")
+                        active_origin_ip = best_candidate
+
+                if active_origin_ip:
+                    _inject_hosts_entry(job.target, active_origin_ip, scan_log)
+                    ctx["active_origin_ip"] = active_origin_ip
+                elif ctx.get("cdn_detected"):
+                    scan_log.warning(
+                        "[System] CDN detected but no origin candidates found. "
+                        "Scanning will go through CDN (limited results expected)."
+                    )
+
+                portscan_done = asyncio.Event()
+
+                # ── Split Pipeline: Infrastructure vs Web ─────────────────────
+                async def run_infra_pipeline():
+                    # ── Stage 4: Port Scanning
+                    host_count = len(ctx.get("live_ips", [ctx["target"]]))
+                    await notify("PortScan", f"Scanning ports on {host_count} hosts...")
+                    portscan = PortScanStage(ctx)
+                    await asyncio.wait_for(portscan.run(), timeout=profiled_config.naabu_timeout)
+                    await finalize_stage("PortScan", len(ctx.get("open_ports", [])))
+                    
+                    # Signal that PortScan is done so Web pipeline can start
+                    portscan_done.set()
+
+                    # ── Stage 5: Service Detection
+                    port_count = len(ctx.get("open_ports", []))
+                    await notify("ServiceScan", f"Detecting services on {port_count} open ports...")
+                    service_scan = ServiceScanStage(ctx)
+                    await asyncio.wait_for(service_scan.run(), timeout=profiled_config.nmap_timeout)
+                    await finalize_stage("ServiceScan", len(ctx.get("services", [])))
+
+                async def run_web_pipeline():
+                    # Wait for PortScan to find open ports before probing
+                    await portscan_done.wait()
+                    
+                    # ── Stage 6: HTTP Probing
+                    await notify("HTTPProbe", "Probing HTTP/HTTPS endpoints...")
+                    http_probe = HttpProbeStage(ctx)
+                    http_probe_timeout = max(
+                        profiled_config.httpx_timeout * 20 + 30,
                         profiled_config.stage_timeout,
                     )
-                    await asyncio.wait_for(web_discovery.run(), timeout=web_discovery_timeout)
-                    await finalize_stage("WebDiscovery", len(ctx.get("discovered_urls", [])))
+                    await asyncio.wait_for(http_probe.run(), timeout=http_probe_timeout)
+                    await finalize_stage("HTTPProbe", len(ctx.get("live_hosts", [])))
 
-                async def run_tls_scan():
-                    await notify("TLSScan", f"Analyzing TLS configuration for {job.target}...")
-                    tls_scan = TLSScanStage(ctx)
-                    try:
-                        await asyncio.wait_for(tls_scan.run(), timeout=profiled_config.testssl_timeout)
-                    except asyncio.TimeoutError:
-                        scan_log.warning(
-                            "[TLSScan] Stage exceeded %ss timeout; continuing with degraded TLS coverage.",
-                            profiled_config.testssl_timeout,
+                    # ── Concurrent Web Stages (7, 8, 10) ──────────────────────
+                    async def run_fingerprint():
+                        await notify("Fingerprint", "Running fingerprinting (WhatWeb, Wafw00f, Webanalyze)...")
+                        fingerprint = FingerprintStage(ctx)
+                        await asyncio.wait_for(fingerprint.run(), timeout=profiled_config.stage_timeout)
+                        await finalize_stage("Fingerprint", len(ctx.get("fingerprint_technologies", [])))
+
+                    async def run_web_discovery():
+                        await notify("WebDiscovery", "Expanding web attack surface from live endpoints...")
+                        web_discovery = WebDiscoveryStage(ctx)
+                        web_discovery_timeout = max(
+                            profiled_config.katana_timeout + profiled_config.gau_timeout + 30,
+                            profiled_config.stage_timeout,
                         )
-                        await tls_scan.handle_timeout()
-                    await finalize_stage("TLSScan")
+                        await asyncio.wait_for(web_discovery.run(), timeout=web_discovery_timeout)
+                        await finalize_stage("WebDiscovery", len(ctx.get("discovered_urls", [])))
 
-                # Execute Fingerprint, Web Discovery, and TLS Scan concurrently
+                    async def run_tls_scan():
+                        await notify("TLSScan", f"Analyzing TLS configuration for {job.target}...")
+                        tls_scan = TLSScanStage(ctx)
+                        try:
+                            await asyncio.wait_for(tls_scan.run(), timeout=profiled_config.testssl_timeout)
+                        except asyncio.TimeoutError:
+                            scan_log.warning(
+                                "[TLSScan] Stage exceeded %ss timeout; continuing with degraded TLS coverage.",
+                                profiled_config.testssl_timeout,
+                            )
+                            await tls_scan.handle_timeout()
+                        await finalize_stage("TLSScan")
+
+                    # Execute Fingerprint, Web Discovery, and TLS Scan concurrently
+                    await asyncio.gather(
+                        run_fingerprint(),
+                        run_web_discovery(),
+                        run_tls_scan(),
+                    )
+
+                    # ── Stage 9: Vulnerability Scanning (Depends on 6, 7, 8) ───
+                    live_count = len(ctx.get("live_hosts", []))
+                    await notify("VulnScan", f"Running vuln scan on {live_count} endpoints...")
+                    vuln_scan = VulnScanStage(ctx)
+                    await asyncio.wait_for(vuln_scan.run(), timeout=profiled_config.nuclei_timeout + profiled_config.nikto_timeout)
+                    await finalize_stage("VulnScan", ctx.get("nuclei_findings_count", 0))
+
+                    if mode == ScanMode.API or ctx.get("api_endpoints"):
+                        await notify("APIScan", "Running authenticated API checks...")
+                        api_scan = APIScanStage(ctx)
+                        await asyncio.wait_for(api_scan.run(), timeout=profiled_config.stage_timeout)
+                        await finalize_stage("APIScan", ctx.get("api_findings_count", 0))
+
+                # Execute Infrastructure and Web pipelines concurrently
+                await notify("System", "Starting parallel execution: Infrastructure and Web Analysis pipelines...")
                 await asyncio.gather(
-                    run_fingerprint(),
-                    run_web_discovery(),
-                    run_tls_scan(),
+                    run_infra_pipeline(),
+                    run_web_pipeline(),
                 )
-
-                # ── Stage 9: Vulnerability Scanning (Depends on 6, 7, 8) ───
-                live_count = len(ctx.get("live_hosts", []))
-                await notify("VulnScan", f"Running vuln scan on {live_count} endpoints...")
-                vuln_scan = VulnScanStage(ctx)
-                await asyncio.wait_for(vuln_scan.run(), timeout=profiled_config.nuclei_timeout + profiled_config.nikto_timeout)
-                await finalize_stage("VulnScan", ctx.get("nuclei_findings_count", 0))
-
-            # Execute Infrastructure and Web pipelines concurrently
-            await notify("System", "Starting parallel execution: Infrastructure and Web Analysis pipelines...")
-            await asyncio.gather(
-                run_infra_pipeline(),
-                run_web_pipeline(),
-            )
-            
-            # ── Stage 11: Git Exposure (Custom Script) ────────────────────
-            await notify("GitExposure", f"Checking for Git exposure using custom script...")
-            git_exposure = GitExposureStage(ctx)
-            await asyncio.wait_for(git_exposure.run(), timeout=300)
-            await finalize_stage("GitExposure", len(ctx.get("git_exposure_findings", [])))
-
-            await finalize_stage("System")
+                await finalize_stage("System")
 
             # ── Persist raw tool outputs ──────────────────────────────────
             raw_data = []
@@ -490,30 +792,68 @@ class JobManager:
             await self.db.save_results(job.scan_id, normalized.to_dict())
             await finalize_stage("Aggregation", 1)
 
-            await notify("AIAnalysis", "Running AI-powered security analysis (Gemini 1.5 Pro → Groq fallback)...")
-            ai = AIEngine(self.config.gemini, self.config.groq)
-            try:
-                analysis = await ai.analyze(normalized)
-                # Enrich top findings with AI-rewritten descriptions
-                try:
-                    await ai.enrich_findings(normalized.findings)
-                except Exception as enrich_err:
-                    logger.warning(f"Finding enrichment failed (non-fatal): {enrich_err}")
-                    ctx["tool_errors"].append(f"AIAnalysis: Finding enrichment failed: {enrich_err}")
-            finally:
-                await ai.close()
-            ctx["analysis"] = analysis
-            if analysis.error_sections:
-                message = (
-                    f"AI fallback used for {len(analysis.error_sections)} section(s): "
-                    f"{', '.join(analysis.error_sections)}"
+            if mode == ScanMode.API:
+                await notify("Done", "API-only scan complete. Raw JSON evidence is ready.")
+                job.state = JobState.COMPLETED
+                job.completed_at = datetime.utcnow()
+
+                summary = {
+                    "subdomains": len(ctx.get("subdomains", [])),
+                    "open_ports": len(ctx.get("open_ports", [])),
+                    "live_hosts": len(ctx.get("live_hosts", [])),
+                    "discovered_urls": len(ctx.get("discovered_urls", [])),
+                    "total_findings": normalized.total_findings,
+                    "observed_findings": normalized.observed_findings_count,
+                    "excluded_findings": normalized.excluded_findings_count,
+                    "risk_level": normalized.risk_level,
+                    "risk_score": normalized.risk_score,
+                    "duration": job.duration_str(),
+                    "tool_errors": len(ctx.get("tool_errors", [])),
+                }
+                await self.db.update_scan_state(
+                    job.scan_id,
+                    "completed",
+                    raw_path=str(ctx.get("raw_json_path", "")),
+                    summary=summary,
                 )
-                ctx["tool_errors"].append(f"AIAnalysis: {message}")
-                if len(analysis.error_sections) == len(analysis.all_sections()):
-                    ctx["stage_errors"]["AIAnalysis"] = message
+                await self.db.audit(
+                    "scan_completed",
+                    user_id=job.user_id,
+                    scan_id=job.scan_id,
+                    detail=f"api-only risk={normalized.risk_level}, findings={normalized.total_findings}",
+                )
+                await complete_stage("Done")
+                return
+            else:
+                from analysis.ai_engine import AIEngine
+
+                await notify("AIAnalysis", "Running AI-powered security analysis (Gemini 1.5 Pro → Groq fallback)...")
+                ai = AIEngine(self.config.gemini, self.config.groq)
+                try:
+                    analysis = await ai.analyze(normalized)
+                    # Enrich top findings with AI-rewritten descriptions
+                    try:
+                        await ai.enrich_findings(normalized.findings)
+                    except Exception as enrich_err:
+                        logger.warning(f"Finding enrichment failed (non-fatal): {enrich_err}")
+                        ctx["tool_errors"].append(f"AIAnalysis: Finding enrichment failed: {enrich_err}")
+                finally:
+                    await ai.close()
+                if analysis.error_sections:
+                    message = (
+                        f"AI fallback used for {len(analysis.error_sections)} section(s): "
+                        f"{', '.join(analysis.error_sections)}"
+                    )
+                    ctx["tool_errors"].append(f"AIAnalysis: {message}")
+                    if len(analysis.error_sections) == len(analysis.all_sections()):
+                        ctx["stage_errors"]["AIAnalysis"] = message
+            ctx["analysis"] = analysis
             await finalize_stage("AIAnalysis")
 
             await notify("Report", "Generating professional PDF report...")
+            from report.report_builder import ReportBuilder
+            from report.pdf_generator import PDFGenerator
+
             builder = ReportBuilder(config=self.config)
             report_data = builder.build(job, normalized, analysis)
 
@@ -575,7 +915,38 @@ class JobManager:
             await notify("Error", f"Scan failed: {e}")
 
         finally:
+            # Clean up /etc/hosts origin bypass entry
+            if active_origin_ip:
+                _remove_hosts_entry(job.target, scan_log)
             scan_log.close()
             # Clean up work directory
             import shutil
             shutil.rmtree(work_dir, ignore_errors=True)
+
+
+# ── /etc/hosts Injection Helpers ─────────────────────────────────────────────
+
+_HOSTS_MARKER = "# pentestbot-origin-bypass"
+
+
+def _inject_hosts_entry(domain: str, ip: str, log) -> None:
+    """Write origin IP → domain mapping to /etc/hosts for CDN bypass."""
+    entry = f"{ip}  {domain}  {_HOSTS_MARKER}"
+    try:
+        with open("/etc/hosts", "a") as f:
+            f.write(f"\n{entry}\n")
+        log.info(f"[System] ✅ CDN Bypass ACTIVE: {domain} → {ip} (injected into /etc/hosts)")
+    except Exception as e:
+        log.warning(f"[System] Failed to inject /etc/hosts entry: {e}")
+
+
+def _remove_hosts_entry(domain: str, log) -> None:
+    """Remove origin bypass entries from /etc/hosts."""
+    try:
+        hosts_path = Path("/etc/hosts")
+        lines = hosts_path.read_text().splitlines()
+        cleaned = [line for line in lines if _HOSTS_MARKER not in line]
+        hosts_path.write_text("\n".join(cleaned) + "\n")
+        log.info(f"[System] Removed CDN bypass entry for {domain}")
+    except Exception as e:
+        log.warning(f"[System] Failed to clean /etc/hosts: {e}")

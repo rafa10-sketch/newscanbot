@@ -21,8 +21,14 @@ else
   gosu pentestbot webanalyze -update 2>/dev/null || echo "[entrypoint] webanalyze update skipped."
 fi
 
-# Fix ownership
-chown -R pentestbot:pentestbot /app/data /app/logs /app/reports /home/pentestbot 2>/dev/null || true
+# Fix ownership of writable application volumes. Avoid recursive chown of
+# /home/pentestbot because nuclei templates can contain many files and can
+# block startup on small disks after Docker volume/cache cleanup.
+chown -R pentestbot:pentestbot /app/data /app/logs /app/reports 2>/dev/null || true
+chown pentestbot:pentestbot /home/pentestbot /home/pentestbot/.config /home/pentestbot/.config/nuclei /home/pentestbot/.config/nuclei/templates 2>/dev/null || true
+
+# Allow pentestbot user to modify /etc/hosts for CDN Bypass feature
+chmod 666 /etc/hosts 2>/dev/null || true
 
 # Run as pentestbot user
 exec gosu pentestbot "$@"

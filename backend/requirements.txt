@@ -32,3 +32,4 @@ anyio>=4.3.0
 # ── Security tool Python wrappers ────────────────────────────
 wafw00f>=2.2.0
 s3scanner>=2.0.2
+defusedcsv>=2.0.0

@@ -132,6 +132,9 @@ class Finding:
     impact:        str         = "Requires contextual validation"
     priority:      str         = "Review in context"
     validated:     bool        = False
+    confidence:    str         = "needs_manual_validation"
+    confidence_score: int      = 40
+    confidence_reason: str     = "Automated observation requires analyst validation."
 
 
 @dataclass
@@ -145,6 +148,7 @@ class AggregatedResult:
     scan_started:  str
     scan_completed: str
     scan_duration:  float
+    scan_mode:      str = "fast"
 
     # Asset inventory
     subdomains:      list[str]        = field(default_factory=list)
@@ -188,6 +192,7 @@ class AggregatedResult:
     limitations:  list[str]  = field(default_factory=list)
     notes:        list[str]  = field(default_factory=list)
     nmap_scripts: dict       = field(default_factory=dict)
+    tools_used:   list[str]  = field(default_factory=list)
 
     def to_dict(self) -> dict:
         d = {
@@ -197,6 +202,7 @@ class AggregatedResult:
             "scan_started":     self.scan_started,
             "scan_completed":   self.scan_completed,
             "scan_duration":    self.scan_duration,
+            "scan_mode":        self.scan_mode,
             "subdomains":       self.subdomains,
             "resolved_ips":     self.resolved_ips,
             "ip_to_hosts":      self.ip_to_hosts,
@@ -225,6 +231,7 @@ class AggregatedResult:
             "limitations":      self.limitations,
             "notes":            self.notes,
             "nmap_scripts":     self.nmap_scripts,
+            "tools_used":       self.tools_used,
         }
         return d
 
@@ -251,6 +258,7 @@ class ResultAggregator:
             scan_started   = str(ctx.get("scan_started", datetime.utcnow().isoformat())),
             scan_completed = datetime.utcnow().isoformat(),
             scan_duration  = ctx.get("scan_duration", 0.0),
+            scan_mode      = str(ctx.get("scan_mode", "fast")),
         )
 
         # ── Asset inventory ───────────────────────────────────────────────
@@ -368,6 +376,107 @@ class ResultAggregator:
                 extra={"kind": "nikto", "raw_description": raw_desc},
             ))
 
+        # SQLMap findings
+        for smf in ctx.get("sqlmap_findings", []):
+            fid = f"sqlmap-{_finding_fingerprint(smf)}"
+            add_finding(Finding(
+                id          = fid,
+                title       = "SQL Injection Vulnerability",
+                severity    = smf.get("severity", "high"),
+                description = smf.get("description", "SQLMap detected a potential SQL injection."),
+                affected    = [result.target],
+                source      = "sqlmap",
+                evidence_status="Active exploitation evidence",
+                exploitability="Confirmed exploitable",
+                impact="Database compromise and data exfiltration",
+                priority="Immediate Fix (0-7 days)",
+                validated   = True,
+                extra       = {"kind": "sqlmap"},
+            ))
+
+        # Dalfox findings
+        for dxf in ctx.get("dalfox_findings", []):
+            fid = f"dalfox-{_finding_fingerprint(dxf)}"
+            severity = dxf.get("severity", "high")
+            add_finding(Finding(
+                id          = fid,
+                title       = dxf.get("title", "Cross-Site Scripting Finding"),
+                severity    = severity,
+                description = dxf.get(
+                    "description",
+                    "Dalfox identified a potential cross-site scripting issue that should be manually validated.",
+                ),
+                affected    = dxf.get("affected", [dxf.get("url", result.target)]),
+                source      = "dalfox",
+                evidence_status="Specialized XSS scanner evidence",
+                exploitability="Likely exploitable" if severity in {"critical", "high"} else "Needs manual validation",
+                impact="Client-side script execution, session theft, or user action manipulation",
+                priority="Immediate Fix (0-7 days)" if severity in {"critical", "high"} else "Short-Term Fix (7-30 days)",
+                validated   = severity in {"critical", "high"},
+                extra       = dxf.get("extra", {"kind": "dalfox"}),
+            ))
+
+        # S3 bucket exposure findings
+        for s3f in ctx.get("s3_findings", []):
+            fid = f"s3scanner-{_finding_fingerprint(s3f)}"
+            severity = s3f.get("severity", "medium")
+            add_finding(Finding(
+                id          = fid,
+                title       = s3f.get("title", "Potentially Exposed S3 Bucket"),
+                severity    = severity,
+                description = s3f.get("description", "S3Scanner identified a possible cloud storage exposure."),
+                affected    = s3f.get("affected", [result.target]),
+                source      = "s3scanner",
+                evidence_status="Cloud storage scanner evidence",
+                exploitability="Needs manual validation",
+                impact="Potential public access to object storage data",
+                priority="Immediate Fix (0-7 days)" if severity in {"critical", "high"} else "Short-Term Fix (7-30 days)",
+                validated=False,
+                extra       = s3f.get("extra", {"kind": "s3scanner"}),
+            ))
+
+        # CMS scanner findings
+        for cms_key, source, default_title in (
+            ("wpscan_findings", "wpscan", "WordPress Security Finding"),
+            ("joomscan_findings", "joomscan", "Joomla Security Finding"),
+        ):
+            for cmsf in ctx.get(cms_key, []):
+                severity = cmsf.get("severity", "medium")
+                add_finding(Finding(
+                    id          = f"{source}-{_finding_fingerprint(cmsf)}",
+                    title       = cmsf.get("title", default_title),
+                    severity    = severity,
+                    description = cmsf.get("description", default_title),
+                    affected    = cmsf.get("affected", [result.target]),
+                    source      = source,
+                    references  = cmsf.get("references", []),
+                    evidence_status="CMS scanner evidence",
+                    exploitability="Needs manual validation",
+                    impact="Potential CMS compromise or information exposure",
+                    priority="Immediate Fix (0-7 days)" if severity in {"critical", "high"} else "Short-Term Fix (7-30 days)",
+                    validated=False,
+                    extra       = cmsf.get("extra", {"kind": source}),
+                ))
+
+        # API scan findings
+        for af in ctx.get("api_findings", []):
+            fid = f"api-{af.get('id') or _finding_fingerprint(af)}"
+            severity = af.get("severity", "info")
+            add_finding(Finding(
+                id          = fid,
+                title       = af.get("title", "API Security Finding"),
+                severity    = severity,
+                description = af.get("description", "The API scanner identified an application-layer security condition that should be validated manually."),
+                affected    = af.get("affected", [af.get("url", result.target)]),
+                source      = af.get("source", "api-scan"),
+                evidence_status="Application-layer scanner evidence",
+                exploitability="Needs manual validation",
+                impact="Potential API access control or data exposure weakness",
+                priority="Immediate Fix (0-7 days)" if severity in {"critical", "high"} else "Short-Term Fix (7-30 days)",
+                validated=False,
+                extra       = af.get("extra", {"kind": "api-scan"}),
+            ))
+
         # TLS findings
         for tf in result.tls_findings:
             fid = f"tls-{_finding_fingerprint(tf)}"
@@ -426,6 +535,7 @@ class ResultAggregator:
         # Tool errors
         result.tool_errors = ctx.get("tool_errors", [])
         result.limitations = _dedupe_strs(ctx.get("limitations", []))
+        result.tools_used = _derive_tools_used(ctx, result.findings)
 
         return result
 
@@ -599,3 +709,45 @@ def _dedupe_tls_findings(findings: list[dict]) -> list[dict]:
         seen.add(key)
         out.append(finding)
     return out
+
+
+def _derive_tools_used(ctx: dict, findings: list[Finding]) -> list[str]:
+    if str(ctx.get("scan_mode", "")).lower() == "api":
+        return ["PentestBot API checks"]
+
+    names: list[str] = []
+
+    stage_defaults = {
+        "subdomains": ["subfinder", "assetfinder"],
+        "resolved_hosts": ["dnsx"],
+        "open_ports": ["naabu"],
+        "services": ["nmap"],
+        "live_hosts": ["httpx"],
+        "fingerprint_technologies": ["whatweb", "wafw00f", "webanalyze"],
+        "tls_findings": ["testssl.sh"],
+    }
+    for key, tool_names in stage_defaults.items():
+        if ctx.get(key):
+            names.extend(tool_names)
+
+    for raw in ctx.get("raw_outputs", []):
+        if not isinstance(raw, dict):
+            continue
+        tool = str(raw.get("tool_name", "")).strip()
+        if tool and raw.get("status") == "success":
+            names.append(tool)
+
+    for finding in findings:
+        if finding.source:
+            names.append(finding.source)
+
+    aliases = {
+        "naabu/nmap": "naabu, nmap",
+        "api-scan": "PentestBot API checks",
+    }
+    expanded: list[str] = []
+    for name in names:
+        mapped = aliases.get(name, name)
+        expanded.extend(part.strip() for part in mapped.split(",") if part.strip())
+
+    return _dedupe_strs(expanded)

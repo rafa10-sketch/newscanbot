@@ -1,0 +1,100 @@
+[
+  {
+    "method": "GET",
+    "path": "/MERCHANT_CODE/v2/dopayment?key=scanbot_invalid_key",
+    "name": "Payment Request v2 redirect URL"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/MERCHANT_CODE/transactions/status",
+    "name": "Transaction status",
+    "body": {
+      "key": "scanbot_invalid_key"
+    }
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/payout/MERCHANT_CODE",
+    "name": "Payout request",
+    "body": {
+      "key": "scanbot_invalid_key"
+    }
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/balance/MERCHANT_CODE",
+    "name": "Get balance"
+  },
+  {
+    "method": "POST",
+    "path": "/api/v2/channel/MERCHANT_CODE",
+    "name": "Get active channels",
+    "body": {
+      "key": "scanbot_invalid_key"
+    }
+  },
+  {
+    "method": "POST",
+    "path": "/api/MERCHANT_CODE/v3/dopayment",
+    "name": "Payment Request v3",
+    "body": {
+      "key": "scanbot_invalid_key"
+    }
+  },
+  {
+    "method": "POST",
+    "path": "/api/MERCHANT_CODE/v3/krw-payment",
+    "name": "KRW Payment Request v3",
+    "body": {
+      "key": "scanbot_invalid_key"
+    }
+  },
+  {
+    "method": "POST",
+    "path": "/api/MERCHANT_CODE/v3/submit-utr",
+    "name": "Submit UTR v3",
+    "body": {
+      "key": "scanbot_invalid_key"
+    }
+  },
+  {
+    "method": "POST",
+    "path": "/api/MERCHANT_CODE/v3/submit-refno",
+    "name": "Submit RefNo v3",
+    "body": {
+      "key": "scanbot_invalid_key"
+    }
+  },
+  {
+    "method": "POST",
+    "path": "/api/MERCHANT_CODE/v3/submit-depositor",
+    "name": "Submit Depositor v3",
+    "body": {
+      "key": "scanbot_invalid_key"
+    }
+  },
+  {
+    "method": "POST",
+    "path": "/api/MERCHANT_CODE/v4/dopayment",
+    "name": "Payment Request v4",
+    "body": {
+      "key": "scanbot_invalid_key"
+    }
+  },
+  {
+    "method": "POST",
+    "path": "/api/MERCHANT_CODE/v4/submit-utr",
+    "name": "Submit UTR v4",
+    "body": {
+      "key": "scanbot_invalid_key"
+    }
+  },
+  {
+    "method": "POST",
+    "path": "/api/MERCHANT_CODE/v4/submit-refno",
+    "name": "Submit RefNo v4",
+    "body": {
+      "key": "scanbot_invalid_key"
+    }
+  }
+]

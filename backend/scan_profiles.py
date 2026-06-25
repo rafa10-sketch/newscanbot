@@ -11,12 +11,15 @@ from enum import Enum
 class ScanMode(str, Enum):
     FAST = "fast"
     DEEP = "deep"
+    API = "api"
 
     @classmethod
     def from_str(cls, value: str) -> "ScanMode":
         normalized = (value or "").strip().lower()
         if normalized in ("deep", "in-depth", "indepth", "thorough"):
             return cls.DEEP
+        if normalized in ("api", "api-only", "apiscan", "api-scan"):
+            return cls.API
         return cls.FAST
 
 
@@ -48,20 +51,6 @@ DEEP_OVERRIDES: dict = {
     "nuclei_severity":       "critical,high,medium,low",
     "nuclei_rate_limit":     250,
     "nuclei_timeout":        3600,
-
-    # Additional tools enabled in deep mode
-    "enable_amass":          True,
-    "amass_timeout":         1800,
-    "enable_nikto":          True,
-    "nikto_timeout":         3600,
-    "enable_dirsearch":      True,
-    "dirsearch_timeout":     480,
-    "enable_s3scanner":      True,
-    "s3scanner_timeout":     480,
-
-    # Note: WPScan / Joomscan are NOT force-enabled here.
-    # They are conditionally enabled in the VulnScan stage when
-    # the fingerprint stage detects WordPress or Joomla.
 
     # Pipeline timeouts — longer for thorough scans
     "stage_timeout":         600,

@@ -139,6 +139,24 @@ _NIKTO_REMEDIATION: dict[str, str] = {
     ),
 }
 
+_DALFOX_REMEDIATION = (
+    "Encode untrusted input according to output context before rendering it in HTML, "
+    "JavaScript, attributes, URLs, or CSS. Add server-side validation for the affected "
+    "parameter, avoid unsafe DOM sinks such as innerHTML, and deploy a restrictive "
+    "Content-Security-Policy as defense in depth. Re-test the exact Dalfox payload after fixing."
+)
+
+_S3_REMEDIATION = (
+    "Review the bucket policy, ACLs, and public access block settings. Disable public read/write "
+    "unless explicitly required, enable account-level S3 Block Public Access, and validate object "
+    "access with an unauthenticated request after remediation."
+)
+
+_CMS_REMEDIATION = (
+    "Update the CMS core, themes, plugins, and extensions to patched versions. Remove unused "
+    "components, restrict administrative access, and re-run the CMS-specific scanner after patching."
+)
+
 _GENERIC_REMEDIATION: dict[str, str] = {
     "critical": (
         "Remediate immediately. Treat this as an active incident. "
@@ -231,6 +249,7 @@ class Normalizer:
 
     def normalize(self, result: AggregatedResult) -> AggregatedResult:
         self._inject_remediations(result)
+        self._assign_confidence(result)
         self._record_header_hardening_notes(result)
         self._dedupe_findings(result)
         self._filter_findings(result)
@@ -291,6 +310,19 @@ class Normalizer:
                 if f.remediation:
                     continue
 
+            # Dalfox XSS-specific
+            if f.source == "dalfox":
+                f.remediation = _DALFOX_REMEDIATION
+                continue
+
+            if f.source == "s3scanner":
+                f.remediation = _S3_REMEDIATION
+                continue
+
+            if f.source in {"wpscan", "joomscan"}:
+                f.remediation = _CMS_REMEDIATION
+                continue
+
             # Generic by severity
             f.remediation = _GENERIC_REMEDIATION.get(f.severity, _GENERIC_REMEDIATION["info"])
 
@@ -335,7 +367,12 @@ class Normalizer:
         filtered: list[Finding] = []
         excluded = 0
         result.observed_findings_count = len(result.findings)
-        keep_fn = self._should_keep_finding_deep if self.scan_mode == "deep" else self._should_keep_finding
+        if self.scan_mode == "deep":
+            keep_fn = self._should_keep_finding_deep
+        elif self.scan_mode == "api":
+            keep_fn = self._should_keep_finding_api
+        else:
+            keep_fn = self._should_keep_finding
         for finding in result.findings:
             if keep_fn(finding):
                 filtered.append(finding)
@@ -356,12 +393,206 @@ class Normalizer:
             return url.startswith("https://")
         return True
 
+    def _assign_confidence(self, result: AggregatedResult) -> None:
+        for finding in result.findings:
+            confidence, score, reason = self._confidence_for_finding(finding)
+            finding.confidence = confidence
+            finding.confidence_score = score
+            finding.confidence_reason = reason
+
+    def _confidence_for_finding(self, finding: Finding) -> tuple[str, int, str]:
+        kind = str(finding.extra.get("kind", "")).lower()
+        severity = str(finding.severity or "info").lower()
+        text = " ".join([
+            finding.title or "",
+            finding.description or "",
+            finding.evidence_status or "",
+            finding.exploitability or "",
+            " ".join(finding.tags or []),
+        ]).lower()
+
+        if finding.source == "sqlmap":
+            return (
+                "confirmed",
+                95,
+                "SQLMap reported active exploitation evidence for the affected parameter.",
+            )
+
+        if kind == "exposed-service":
+            return (
+                "confirmed",
+                90,
+                "The service exposure was directly observed during port and service scanning.",
+            )
+
+        if finding.source == "api-scan":
+            return self._api_confidence(finding)
+
+        if finding.source == "dalfox":
+            if severity in {"critical", "high"}:
+                return (
+                    "probable",
+                    80,
+                    "A specialized XSS scanner identified a high-impact payload condition, but browser-context validation is still recommended.",
+                )
+            return (
+                "needs_manual_validation",
+                55,
+                "The XSS signal should be replayed manually before it is treated as confirmed.",
+            )
+
+        if finding.source == "nuclei":
+            if severity in {"critical", "high"}:
+                score = 82 if finding.cve_ids else 76
+                return (
+                    "probable",
+                    score,
+                    "A structured Nuclei template matched the target; manual validation is recommended before treating it as confirmed exploitation.",
+                )
+            if severity == "medium" and any(marker in text for marker in ("cve-", "auth", "takeover", "rce", "sql injection", "ssrf", "xss")):
+                return (
+                    "probable",
+                    68,
+                    "The finding matched a security-relevant template and keyword pattern, but needs analyst confirmation.",
+                )
+            return (
+                "needs_manual_validation",
+                45,
+                "The template match is lower-signal or hardening-oriented and should be reviewed in context.",
+            )
+
+        if finding.source in {"s3scanner", "wpscan", "joomscan"}:
+            return (
+                "probable" if severity in {"critical", "high", "medium"} else "needs_manual_validation",
+                72 if severity in {"critical", "high"} else 60,
+                "A specialized scanner produced the observation; validate affected asset ownership and exploitability manually.",
+            )
+
+        if finding.source == "testssl.sh":
+            if any(marker in text for marker in ("heartbleed", "robot", "drown", "logjam", "sweet32", "freak", "poodle", "rc4")):
+                return (
+                    "probable",
+                    75,
+                    "The TLS scanner identified a named transport security weakness.",
+                )
+            return (
+                "needs_manual_validation",
+                45,
+                "The TLS observation is configuration-oriented and should be prioritized with service context.",
+            )
+
+        if getattr(finding, "validated", False):
+            return (
+                "confirmed",
+                85,
+                "The finding was marked as validated by the aggregation layer.",
+            )
+
+        if severity in {"critical", "high"}:
+            return (
+                "probable",
+                65,
+                "The issue is high impact, but the available automated evidence still needs analyst validation.",
+            )
+
+        return (
+            "needs_manual_validation",
+            40,
+            "The automated signal is not enough to confirm exploitability without manual review.",
+        )
+
+    def _api_confidence(self, finding: Finding) -> tuple[str, int, str]:
+        kind = str(finding.extra.get("kind", "")).lower()
+        similarity = float(finding.extra.get("response_similarity", 0) or 0)
+        has_financial_fields = bool(finding.extra.get("has_financial_fields"))
+        is_key_swap = bool(finding.extra.get("is_key_swap"))
+        status = int(finding.extra.get("status", 0) or 0)
+
+        if kind == "api-negative-control-accepted":
+            if has_financial_fields or is_key_swap:
+                return (
+                    "confirmed",
+                    92,
+                    "A negative-control request unexpectedly returned a successful business response with financial fields or key-swap evidence.",
+                )
+            return (
+                "probable",
+                78,
+                "A request designed to fail returned HTTP success; validate the business impact manually.",
+            )
+
+        if kind == "api-invalid-auth-accepted":
+            if similarity >= 0.85:
+                return (
+                    "confirmed",
+                    90,
+                    "Replacing authentication material produced a successful response that closely matched the authenticated response.",
+                )
+            return (
+                "probable",
+                76,
+                "Invalid authentication was accepted, but response similarity should be reviewed manually.",
+            )
+
+        if kind == "api-signature-bypass-candidate":
+            if similarity >= 0.85:
+                return (
+                    "confirmed",
+                    88,
+                    "Removing or corrupting signature material produced a successful response similar to the signed request.",
+                )
+            return (
+                "probable",
+                74,
+                "Signature enforcement appears weak, but the response difference needs manual validation.",
+            )
+
+        if kind == "api-idor-candidate":
+            if similarity >= 0.85:
+                return (
+                    "probable",
+                    72,
+                    "Identifier tampering returned a successful, similar response; object ownership must be confirmed manually.",
+                )
+            return (
+                "needs_manual_validation",
+                58,
+                "Identifier tampering returned success, but the response does not yet prove cross-object access.",
+            )
+
+        if kind == "api-sensitive-data":
+            return (
+                "probable",
+                72,
+                "The API returned patterns consistent with sensitive data in a successful response.",
+            )
+
+        if kind == "api-public-authenticated-resource":
+            return (
+                "needs_manual_validation",
+                55,
+                "The endpoint succeeded anonymously and with authentication, but it may be intentionally public.",
+            )
+
+        if status >= 500:
+            return (
+                "probable",
+                62,
+                "The API returned a server-side error condition that should be reviewed for exploitable behavior.",
+            )
+
+        return (
+            "needs_manual_validation",
+            50,
+            "The API scanner produced an application-layer signal that needs manual review.",
+        )
+
     def _calculate_risk_score(self, result: AggregatedResult) -> float:
         score = 0.0
 
         # Findings weight
         for f in result.findings:
-            multiplier = 1.0 if getattr(f, "validated", False) else 0.4
+            multiplier = max(0.25, min(getattr(f, "confidence_score", 40) / 100, 1.0))
             score += SEVERITY_WEIGHT.get(f.severity, 0.1) * multiplier
 
         # Dangerous ports bonus
@@ -452,6 +683,12 @@ class Normalizer:
                 )
             )
 
+        if finding.source == "dalfox":
+            return finding.severity in {"critical", "high", "medium"}
+
+        if finding.source in {"s3scanner", "wpscan", "joomscan"}:
+            return finding.severity in {"critical", "high", "medium"}
+
         if finding.source == "nuclei":
             if finding.severity in {"critical", "high"}:
                 return True
@@ -498,5 +735,19 @@ class Normalizer:
         if finding.source == "nikto":
             return finding.severity in {"critical", "high", "medium"}
 
+        # Keep specialized XSS findings
+        if finding.source == "dalfox":
+            return finding.severity in {"critical", "high", "medium"}
+
+        if finding.source in {"s3scanner", "wpscan", "joomscan"}:
+            return finding.severity in {"critical", "high", "medium"}
+
         # Default: keep if medium or higher
         return finding.severity in {"critical", "high", "medium"}
+
+    @staticmethod
+    def _should_keep_finding_api(finding: Finding) -> bool:
+        """API mode keeps application-layer API findings at medium+ severity."""
+        if finding.source == "api-scan":
+            return finding.severity in {"critical", "high", "medium"}
+        return Normalizer._should_keep_finding(finding)

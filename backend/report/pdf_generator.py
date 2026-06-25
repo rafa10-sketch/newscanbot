@@ -100,6 +100,10 @@ class PDFGenerator:
         story.extend(self._section_initial_recommendations(report))
         return story
 
+    @staticmethod
+    def _is_api_only(report: ReportData) -> bool:
+        return getattr(report.result, "scan_mode", "") == "api"
+
     def _cover(self, report: ReportData) -> list:
         story = [
             Spacer(1, 2.2 * cm),
@@ -173,6 +177,10 @@ class PDFGenerator:
         for error in result.tool_errors[:10]:
             limitations.append(error)
 
+        if result.tools_used:
+            story.extend(self._section_subheader("Tools Used"))
+            story.extend(self._bullet_list(result.tools_used[:30]))
+
         story.extend(self._section_subheader("Observed Limitations"))
         if limitations:
             story.extend(self._bullet_list(limitations))
@@ -184,6 +192,18 @@ class PDFGenerator:
         result = report.result
         story = self._section_header("3. Attack Surface Overview")
         story.extend(self._kv_list(list(report.asset_stats.items())))
+
+        if self._is_api_only(report):
+            story.extend(self._section_subheader("API Endpoint Coverage"))
+            story.extend(self._tool_label("PentestBot API checks"))
+            story.extend(self._prose(
+                "This assessment used operator-supplied API endpoints and payloads. "
+                "Subdomain discovery, DNS resolution, port scanning, web crawling, vulnerability templates, "
+                "and TLS scanners were not executed in API-only mode."
+            ))
+            story.extend(self._section_subheader("Assessment Notes"))
+            story.extend(self._prose(report.analysis.attack_surface))
+            return story
 
         if result.subdomains:
             story.extend(self._section_subheader("Discovered Hosts"))
@@ -202,7 +222,7 @@ class PDFGenerator:
 
         if result.discovered_urls:
             story.extend(self._section_subheader("Prioritized Discovered URLs"))
-            story.extend(self._tool_label("Katana, Gau"))
+            story.extend(self._tool_label("Katana, Gau, Gobuster, Dirsearch"))
             story.extend(self._bullet_list(result.discovered_urls[:20]))
 
         story.extend(self._section_subheader("Assessment Notes"))
@@ -212,6 +232,15 @@ class PDFGenerator:
     def _section_network_exposure(self, report: ReportData) -> list:
         result = report.result
         story = self._section_header("4. Network Exposure")
+
+        if self._is_api_only(report):
+            story.extend(self._prose(
+                "Network exposure testing was not part of this API-only assessment. "
+                "No port scan, service fingerprinting, or origin infrastructure enumeration was executed."
+            ))
+            story.extend(self._section_subheader("Assessment Notes"))
+            story.extend(self._prose(report.analysis.network_exposure))
+            return story
 
         if result.open_ports:
             story.extend(self._section_subheader("Open Ports and Services"))
@@ -250,7 +279,13 @@ class PDFGenerator:
 
     def _section_web_observations(self, report: ReportData) -> list:
         result = report.result
-        story = self._section_header("5. Web and Application Observations")
+        story = self._section_header("5. API and Application Observations" if self._is_api_only(report) else "5. Web and Application Observations")
+
+        if self._is_api_only(report):
+            story.extend(self._section_subheader("API Review"))
+            story.extend(self._tool_label("PentestBot API checks"))
+            story.extend(self._prose(report.analysis.vulnerability_analysis))
+            return story
 
         if result.live_hosts:
             story.extend(self._section_subheader("Live Web Endpoints"))
@@ -282,12 +317,22 @@ class PDFGenerator:
             story.extend(self._bullet_list(result.web_servers[:10]))
 
         story.extend(self._section_subheader("Vulnerability Review"))
+        story.extend(self._tool_label("Nuclei, Nikto, SQLMap, Dalfox"))
         story.extend(self._prose(report.analysis.vulnerability_analysis))
         return story
 
     def _section_tls(self, report: ReportData) -> list:
         result = report.result
         story = self._section_header("6. TLS and Transport Security")
+
+        if self._is_api_only(report):
+            story.extend(self._prose(
+                "TLS and transport security scanning was not part of this API-only assessment. "
+                "The scan focused on supplied API endpoint behavior and negative-control validation."
+            ))
+            story.extend(self._section_subheader("Assessment Notes"))
+            story.extend(self._prose(report.analysis.tls_analysis))
+            return story
 
         if result.cert_info:
             story.extend(self._section_subheader("Certificate Information"))
@@ -355,18 +400,28 @@ class PDFGenerator:
     def _section_appendix(self, report: ReportData) -> list:
         result = report.result
         story = self._section_header("Appendix: Tool Status and Notes")
-        story.extend(self._bullet_list([
-            f"Validated findings: {report.metadata.total_findings}",
-            f"Observed indicators: {report.metadata.observed_findings}",
-            f"Excluded observations: {report.metadata.excluded_findings}",
-            f"Subdomains discovered: {len(result.subdomains)}",
-            f"Resolved IPs: {len(result.resolved_ips)}",
-            f"Open ports: {len(result.open_ports)}",
-            f"Services identified: {len(result.services)}",
-            f"Live web endpoints: {len(result.live_hosts)}",
-            f"TLS findings: {len(result.tls_findings)}",
-            f"Reportable findings after filtering: {len(result.findings)}",
-        ]))
+        if self._is_api_only(report):
+            story.extend(self._bullet_list([
+                f"Validated findings: {report.metadata.total_findings}",
+                f"Observed indicators: {report.metadata.observed_findings}",
+                f"Excluded observations: {report.metadata.excluded_findings}",
+                "Mode: API-only",
+                f"Tools used: {', '.join(result.tools_used) or 'PentestBot API checks'}",
+                f"Reportable findings after filtering: {len(result.findings)}",
+            ]))
+        else:
+            story.extend(self._bullet_list([
+                f"Validated findings: {report.metadata.total_findings}",
+                f"Observed indicators: {report.metadata.observed_findings}",
+                f"Excluded observations: {report.metadata.excluded_findings}",
+                f"Subdomains discovered: {len(result.subdomains)}",
+                f"Resolved IPs: {len(result.resolved_ips)}",
+                f"Open ports: {len(result.open_ports)}",
+                f"Services identified: {len(result.services)}",
+                f"Live web endpoints: {len(result.live_hosts)}",
+                f"TLS findings: {len(result.tls_findings)}",
+                f"Reportable findings after filtering: {len(result.findings)}",
+            ]))
 
         story.extend(self._section_subheader("Tool Warnings"))
         warnings = list(result.limitations[:20])
@@ -442,6 +497,7 @@ class PDFGenerator:
         story.extend(self._tool_label(finding.source or "Heuristic Analysis"))
         
         lines = [
+            ("Confidence", self._finding_confidence(finding)),
             ("Evidence Status", self._finding_evidence_status(finding)),
             ("Exploitability", self._finding_exploitability(finding)),
             ("Impact", self._finding_impact(finding)),
@@ -465,6 +521,22 @@ class PDFGenerator:
             Spacer(1, 0.25 * cm),
         ])
         return story
+
+    def _finding_confidence(self, finding: Finding) -> str:
+        labels = {
+            "confirmed": "Confirmed",
+            "probable": "Probable",
+            "needs_manual_validation": "Needs Manual Validation",
+            "blocked": "Blocked / Inconclusive",
+            "informational": "Informational",
+        }
+        raw = str(getattr(finding, "confidence", "") or "needs_manual_validation")
+        label = labels.get(raw, raw.replace("_", " ").title())
+        score = int(getattr(finding, "confidence_score", 40) or 40)
+        reason = str(getattr(finding, "confidence_reason", "") or "").strip()
+        if reason:
+            return f"{label} ({score}/100) - {reason}"
+        return f"{label} ({score}/100)"
 
     def _finding_evidence_status(self, finding: Finding) -> str:
         if getattr(finding, "evidence_status", ""):

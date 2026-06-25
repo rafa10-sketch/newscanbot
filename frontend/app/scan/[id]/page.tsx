@@ -5,12 +5,15 @@ import { useParams } from "next/navigation";
 import {
   getScanStatus,
   getScanLogs,
+  getApiEvidence,
   downloadReport,
   downloadRawData,
+  downloadApiEvidence,
   cancelScan,
   deleteScan,
   type ScanStatus,
   type LogEntry,
+  type ApiEvidence,
 } from "@/lib/api";
 
 const STAGE_LABELS: Record<string, string> = {
@@ -24,7 +27,6 @@ const STAGE_LABELS: Record<string, string> = {
   Fingerprint: "Fingerprinting",
   WebDiscovery: "Web Discovery",
   VulnScan: "Vulnerability Scan",
-  GitExposure: "Git Exposure Check",
   TLSScan: "TLS Analysis",
   Aggregation: "Aggregation",
   AIAnalysis: "AI Analysis",
@@ -60,12 +62,44 @@ function riskColor(level: string | undefined): string {
   }
 }
 
+function apiResultLabel(result: string): string {
+  switch (result) {
+    case "pass":
+      return "PASS";
+    case "finding":
+      return "FINDING";
+    case "blocked":
+      return "BLOCKED";
+    case "fail":
+      return "FAIL";
+    default:
+      return result.toUpperCase();
+  }
+}
+
+function confidenceLabel(confidence: string | undefined): string {
+  switch (confidence) {
+    case "confirmed":
+      return "CONFIRMED";
+    case "probable":
+      return "PROBABLE";
+    case "blocked":
+      return "BLOCKED";
+    case "informational":
+      return "INFO";
+    case "needs_manual_validation":
+    default:
+      return "MANUAL";
+  }
+}
+
 export default function ScanPage() {
   const params = useParams();
   const scanId = params.id as string;
 
   const [scan, setScan] = useState<ScanStatus | null>(null);
   const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [apiEvidence, setApiEvidence] = useState<ApiEvidence | null>(null);
   const [logCursor, setLogCursor] = useState(0);
   const [error, setError] = useState("");
   const [showTimeline, setShowTimeline] = useState(false);
@@ -118,17 +152,39 @@ export default function ScanPage() {
     }
   }, [scanId, logCursor]);
 
+  const fetchApiEvidence = useCallback(async () => {
+    try {
+      const evidence = await getApiEvidence(scanId);
+      setApiEvidence(evidence);
+    } catch {
+      setApiEvidence(null);
+    }
+  }, [scanId]);
+
   // Initial load
   useEffect(() => {
     fetchStatus();
     fetchLogs();
   }, []);
 
+  useEffect(() => {
+    if (scan?.scanMode === "api" && (scan.rawReady || isTerminal)) {
+      fetchApiEvidence();
+    }
+  }, [scan?.scanMode, scan?.rawReady, isTerminal, fetchApiEvidence]);
+
   // Polling
   useEffect(() => {
     if (isTerminal) {
       if (pollRef.current) clearInterval(pollRef.current);
-      return;
+      const finalRefresh = setTimeout(() => {
+        fetchStatus();
+        fetchLogs();
+        if (scan?.scanMode === "api") {
+          fetchApiEvidence();
+        }
+      }, 1000);
+      return () => clearTimeout(finalRefresh);
     }
 
     pollRef.current = setInterval(async () => {
@@ -148,7 +204,7 @@ export default function ScanPage() {
     return () => {
       if (pollRef.current) clearInterval(pollRef.current);
     };
-  }, [isTerminal, fetchStatus, fetchLogs]);
+  }, [isTerminal, scan?.scanMode, fetchStatus, fetchLogs, fetchApiEvidence]);
 
   // Auto-scroll logs
   useEffect(() => {
@@ -184,6 +240,14 @@ export default function ScanPage() {
     : scan.state === "failed"
       ? "failed"
       : "";
+  const apiCaseCounts = apiEvidence?.caseCounts || apiEvidence?.counts || {
+    total: 0,
+    pass: 0,
+    fail: 0,
+    finding: 0,
+    blocked: 0,
+  };
+  const apiTestCases = apiEvidence?.testCases || [];
 
   return (
     <div className="scan-page">
@@ -192,7 +256,11 @@ export default function ScanPage() {
         <div className="target-badge">🎯 {scan.target}</div>
         {scan.scanMode && (
           <span className={`scan-mode-badge ${scan.scanMode}`}>
-            {scan.scanMode === "deep" ? "🔬 In-Depth Scan" : "⚡ Fast Scan"}
+            {scan.scanMode === "deep"
+              ? "🔬 In-Depth Scan"
+              : scan.scanMode === "api"
+                ? "API Scan"
+                : "⚡ Fast Scan"}
           </span>
         )}
 
@@ -417,6 +485,143 @@ export default function ScanPage() {
         </div>
       )}
 
+      {scan.scanMode === "api" && apiEvidence?.ready && (
+        <div className="card">
+          <div className="card-header">
+            <div className="card-title">API Evidence Summary</div>
+            <div className="card-subtitle">
+              Deterministic API matrix results. Secrets and sensitive query values are redacted.
+            </div>
+          </div>
+
+          {apiEvidence.headline && (
+            <div className={`api-verdict-card ${apiEvidence.verdict || "pass"}`}>
+              <span>{apiResultLabel(apiEvidence.verdict === "needs_review" ? "fail" : apiEvidence.verdict || "pass")}</span>
+              <strong>{apiEvidence.headline}</strong>
+            </div>
+          )}
+
+          <div className="api-evidence-stats">
+            <div className="api-evidence-stat">
+              <span>Test Cases</span>
+              <strong>{apiCaseCounts.total}</strong>
+            </div>
+            <div className="api-evidence-stat pass">
+              <span>Pass</span>
+              <strong>{apiCaseCounts.pass}</strong>
+            </div>
+            <div className="api-evidence-stat finding">
+              <span>Findings</span>
+              <strong>{apiCaseCounts.finding}</strong>
+            </div>
+            <div className="api-evidence-stat fail">
+              <span>Fail</span>
+              <strong>{apiCaseCounts.fail}</strong>
+            </div>
+            <div className="api-evidence-stat blocked">
+              <span>Blocked</span>
+              <strong>{apiCaseCounts.blocked}</strong>
+            </div>
+          </div>
+
+          {apiTestCases.length > 0 && (
+            <div className="api-review-list">
+              {apiTestCases.map((testCase, index) => (
+                <div className={`api-review-card ${testCase.result}`} key={`${testCase.name}-${index}`}>
+                  <div className="api-review-topline">
+                    <span className={`api-result-pill ${testCase.result}`}>
+                      {apiResultLabel(testCase.result)}
+                    </span>
+                    <div>
+                      <strong>{testCase.name}</strong>
+                      <div className="api-test-url">{testCase.method} {testCase.url}</div>
+                    </div>
+                  </div>
+                  <p>{testCase.summary}</p>
+                  <div className="api-context-list">
+                    {testCase.contexts.map((context, contextIndex) => (
+                      <span key={`${context.authContext}-${contextIndex}`}>
+                        {context.authContext}: HTTP {context.status}
+                      </span>
+                    ))}
+                  </div>
+                  {testCase.jsonFields.length > 0 && (
+                    <div className="api-fields">Fields: {testCase.jsonFields.join(", ")}</div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+
+          {apiEvidence.findings.length > 0 && (
+            <div className="api-finding-list">
+              {apiEvidence.findings.map((finding, index) => (
+                <div className="api-finding-card" key={`${finding.title}-${index}`}>
+                  <div>
+                    <span className={`api-severity ${finding.severity.toLowerCase()}`}>{finding.severity}</span>
+                    <span className={`api-confidence ${finding.confidence || "needs_manual_validation"}`}>
+                      {confidenceLabel(finding.confidence)}
+                      {typeof finding.confidenceScore === "number" ? ` ${finding.confidenceScore}` : ""}
+                    </span>
+                    <strong>{finding.title}</strong>
+                  </div>
+                  <p>{finding.description}</p>
+                  {finding.confidenceReason && (
+                    <div className="api-fields">Confidence: {finding.confidenceReason}</div>
+                  )}
+                  {finding.jsonFields.length > 0 && (
+                    <div className="api-fields">Fields: {finding.jsonFields.join(", ")}</div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div className="api-raw-heading">Request detail</div>
+          <div className="api-evidence-table-wrap">
+            <table className="api-evidence-table">
+              <thead>
+                <tr>
+                  <th>Test Case</th>
+                  <th>Method</th>
+                  <th>Status</th>
+                  <th>Expected</th>
+                  <th>Result</th>
+                  <th>Fields</th>
+                </tr>
+              </thead>
+              <tbody>
+                {apiEvidence.observations.map((obs, index) => (
+                  <tr key={`${obs.name}-${obs.authContext}-${index}`}>
+                    <td>
+                      <div className="api-test-name">{obs.name}</div>
+                      <div className="api-test-url">{obs.url}</div>
+                      <div className="api-test-context">{obs.authContext}</div>
+                    </td>
+                    <td>{obs.method}</td>
+                    <td>{obs.status}</td>
+                    <td>{obs.expected}</td>
+                    <td>
+                      <span className={`api-result-pill ${obs.result}`}>
+                        {apiResultLabel(obs.result)}
+                      </span>
+                    </td>
+                    <td>{obs.jsonFields.length ? obs.jsonFields.join(", ") : "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {apiEvidence.counts.blocked > 0 && (
+            <div className="api-evidence-note">
+              Some requests were blocked before reaching the application, usually by a CDN/WAF challenge.
+              Re-run from an allowlisted network or with an authorized origin IP to validate API behavior.
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Error Detail */}
       {scan.state === "failed" && scan.error && (
         <div className="card">
@@ -459,9 +664,11 @@ export default function ScanPage() {
           <button
             className="btn btn-ghost"
             style={{ color: "var(--accent-cyan)", borderColor: "rgba(34, 211, 238, 0.2)" }}
-            onClick={() => downloadRawData(scanId).catch((e) => alert(e.message))}
+            onClick={() => (
+              scan.scanMode === "api" ? downloadApiEvidence(scanId) : downloadRawData(scanId)
+            ).catch((e) => alert(e.message))}
           >
-            📊 Download Raw JSON
+            {scan.scanMode === "api" ? "📊 Download API Summary JSON" : "📊 Download Raw JSON"}
           </button>
         )}
       </div>

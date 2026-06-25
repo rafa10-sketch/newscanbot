@@ -14,7 +14,7 @@ The scan pipeline runs **10 active scanning stages** sequentially. The dashboard
 | 6 | **HTTPProbe** | `httpx` (ProjectDiscovery) | HTTP probing — probes all candidate web URLs for liveness, status code, page title, technologies, and web server headers. Falls back to `curl` if httpx is missing. |
 | 7 | **Fingerprint** | `whatweb`, `wafw00f`, `webanalyze` | Technology fingerprinting & WAF detection — identifies CMS, frameworks, libraries, and WAFs running on the target. |
 | 8 | **WebDiscovery** | `gau`, `katana` | Web attack surface expansion — `gau` pulls historical URLs from passive sources; `katana` crawls live endpoints to find additional paths and parameterized URLs. |
-| 9 | **VulnScan** | `nuclei`, `nikto`, `wpscan`*, `joomscan`* | Vulnerability scanning — template-based scanning (Nuclei), web server misconfiguration checks (Nikto), and CMS-specific scanners when detected. |
+| 9 | **VulnScan** | `nuclei`, `nikto`, `sqlmap`*, `dalfox`*, `wpscan`*, `joomscan`* | Vulnerability scanning — template-based scanning (Nuclei), web server misconfiguration checks (Nikto), SQL injection checks (SQLMap), XSS checks on parameterized URLs (Dalfox), and CMS-specific scanners when detected. |
 | 10 | **TLSScan** | `testssl.sh`, `sslyze`, `openssl` | TLS/SSL analysis — checks certificate validity, cipher suites, protocol versions, and known TLS vulnerabilities (BEAST, POODLE, Heartbleed, etc.). |
 
 > [!NOTE]
@@ -71,6 +71,7 @@ The scan mode defaults to **Quick (fast)**. Deep mode applies overrides from [sc
 |------|-------------------|---------|
 | `wpscan` | WordPress detected in fingerprint stage (deep mode only) | WordPress-specific vulnerability scanning |
 | `joomscan` | Joomla detected in fingerprint stage (deep mode only) | Joomla-specific vulnerability scanning |
+| `dalfox` | `ENABLE_DALFOX=true` and parameterized URLs discovered | XSS scanning for query parameters discovered by WebDiscovery |
 
 > [!IMPORTANT]
 > WPScan and Joomscan are not force-enabled by deep mode alone. They are only queued when the relevant CMS is detected and the scan is already running in deep mode.

@@ -96,23 +96,31 @@ class ReportBuilder:
         for f in result.findings:
             by_severity.setdefault(f.severity, []).append(f)
 
-        # Asset statistics
-        asset_stats = {
-            "Validated Findings":      result.total_findings,
-            "Observed Indicators":     result.observed_findings_count,
-            "Excluded Observations":   result.excluded_findings_count,
-            "Subdomains Discovered":   len(result.subdomains),
-            "Resolved IP Addresses":   len(result.resolved_ips),
-            "Live Web Endpoints":       len(result.live_hosts),
-            "Discovered URLs":          len(result.discovered_urls),
-            "Open Ports":               len(result.open_ports),
-            "Dangerous Ports":          len([p for p in result.dangerous_ports if p.risk_level in {"critical", "high"}]),
-            "Identified Services":      len(result.services),
-            "Detected Technologies":    len(result.technologies),
-            "TLS Issues":               len(result.tls_findings),
-            "CDN / WAF Detected":       "Yes" if result.cdn_detected else "No",
-            "Origin IPs Identified":    len(result.origin_candidates),
-        }
+        if getattr(result, "scan_mode", "") == "api":
+            asset_stats = {
+                "Validated Findings":      result.total_findings,
+                "Observed Indicators":     result.observed_findings_count,
+                "Excluded Observations":   result.excluded_findings_count,
+                "Assessment Mode":         "API-only",
+                "Tools Used":              ", ".join(result.tools_used) or "PentestBot API checks",
+            }
+        else:
+            asset_stats = {
+                "Validated Findings":      result.total_findings,
+                "Observed Indicators":     result.observed_findings_count,
+                "Excluded Observations":   result.excluded_findings_count,
+                "Subdomains Discovered":   len(result.subdomains),
+                "Resolved IP Addresses":   len(result.resolved_ips),
+                "Live Web Endpoints":       len(result.live_hosts),
+                "Discovered URLs":          len(result.discovered_urls),
+                "Open Ports":               len(result.open_ports),
+                "Dangerous Ports":          len([p for p in result.dangerous_ports if p.risk_level in {"critical", "high"}]),
+                "Identified Services":      len(result.services),
+                "Detected Technologies":    len(result.technologies),
+                "TLS Issues":               len(result.tls_findings),
+                "CDN / WAF Detected":       "Yes" if result.cdn_detected else "No",
+                "Origin IPs Identified":    len(result.origin_candidates),
+            }
 
         return ReportData(
             metadata          = metadata,

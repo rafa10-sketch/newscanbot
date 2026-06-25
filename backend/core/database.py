@@ -37,7 +37,10 @@ class Database:
         error       TEXT,
         pdf_path    TEXT,
         raw_path    TEXT,
-        summary     TEXT  -- JSON blob of key metrics
+        summary     TEXT,  -- JSON blob of key metrics
+        auth_login_url TEXT,
+        auth_login_payload TEXT,
+        auth_token_json_path TEXT
     );
 
     CREATE TABLE IF NOT EXISTS scan_stages (
@@ -95,12 +98,12 @@ class Database:
         self._conn.row_factory = aiosqlite.Row
         await self._conn.executescript(self.SCHEMA)
         await self._conn.commit()
-        # Migration: add scan_mode column if missing
-        await self._migrate_scan_mode()
+        # Migration: add columns if missing
+        await self._migrate_columns()
         logger.info(f"Database initialized: {self.db_path}")
 
-    async def _migrate_scan_mode(self) -> None:
-        """Add scan_mode column to scans table if it doesn't exist."""
+    async def _migrate_columns(self) -> None:
+        """Ensure all columns exist in scans table."""
         try:
             async with self._conn.execute("PRAGMA table_info(scans)") as cur:
                 columns = [row[1] for row in await cur.fetchall()]
@@ -117,6 +120,27 @@ class Database:
                 )
                 await self._conn.commit()
                 logger.info("Migration: added raw_path column to scans table")
+
+            if "auth_login_url" not in columns:
+                await self._conn.execute(
+                    "ALTER TABLE scans ADD COLUMN auth_login_url TEXT"
+                )
+                await self._conn.commit()
+                logger.info("Migration: added auth_login_url column to scans table")
+
+            if "auth_login_payload" not in columns:
+                await self._conn.execute(
+                    "ALTER TABLE scans ADD COLUMN auth_login_payload TEXT"
+                )
+                await self._conn.commit()
+                logger.info("Migration: added auth_login_payload column to scans table")
+
+            if "auth_token_json_path" not in columns:
+                await self._conn.execute(
+                    "ALTER TABLE scans ADD COLUMN auth_token_json_path TEXT"
+                )
+                await self._conn.commit()
+                logger.info("Migration: added auth_token_json_path column to scans table")
         except Exception as e:
             if "duplicate column name" not in str(e).lower():
                 logger.warning(f"Migration check failed: {e}")
@@ -134,11 +158,16 @@ class Database:
         user_id: int,
         target: str,
         scan_mode: str = "fast",
+        auth_login_url: Optional[str] = None,
+        auth_login_payload: Optional[str] = None,
+        auth_token_json_path: Optional[str] = None,
     ) -> None:
         await self._conn.execute(
-            """INSERT INTO scans (scan_id, user_id, target, state, created_at, scan_mode)
-               VALUES (?, ?, ?, 'queued', ?, ?)""",
-            (scan_id, user_id, target, time.time(), scan_mode),
+            """INSERT INTO scans (scan_id, user_id, target, state, created_at, scan_mode,
+                                 auth_login_url, auth_login_payload, auth_token_json_path)
+               VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?)""",
+            (scan_id, user_id, target, time.time(), scan_mode,
+             auth_login_url, auth_login_payload, auth_token_json_path),
         )
         await self._conn.commit()
         logger.debug(f"Created scan record: {scan_id}")

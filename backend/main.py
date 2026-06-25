@@ -79,9 +79,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--scan-mode",
-        choices=["fast", "deep"],
+        choices=["fast", "deep", "api"],
         default="fast",
-        help="Scan mode: 'fast' (default) or 'deep' (thorough, slower)",
+        help="Scan mode: 'fast' (default), 'deep' (thorough, slower), or 'api'",
     )
     parser.add_argument(
         "--log-level",
@@ -89,7 +89,82 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Override log level from config",
     )
+    parser.add_argument(
+        "--origin-ip",
+        default=None,
+        help="Authorized public origin IP to use for CDN bypass during a test scan",
+    )
+    parser.add_argument(
+        "--api-endpoints",
+        default=None,
+        help="API endpoints for api mode, e.g. 'GET /api/users/me'",
+    )
+    parser.add_argument(
+        "--api-endpoints-file",
+        default=None,
+        help="File containing API endpoints, one per line or OpenAPI JSON",
+    )
+    parser.add_argument(
+        "--custom-headers",
+        default=None,
+        help="Custom headers, one per line",
+    )
+    parser.add_argument(
+        "--custom-headers-file",
+        default=None,
+        help="File containing custom headers, one per line",
+    )
+    parser.add_argument(
+        "--custom-cookies",
+        default=None,
+        help="Cookie header value for authenticated scanning",
+    )
+    parser.add_argument(
+        "--custom-cookies-file",
+        default=None,
+        help="File containing the Cookie header value",
+    )
+    parser.add_argument(
+        "--auth-login-url",
+        default=None,
+        help="Login URL for dynamic authenticated test scans",
+    )
+    parser.add_argument(
+        "--auth-login-payload",
+        default=None,
+        help="Login payload for dynamic authenticated test scans",
+    )
+    parser.add_argument(
+        "--auth-login-payload-file",
+        default=None,
+        help="File containing the login payload",
+    )
+    parser.add_argument(
+        "--auth-token-json-path",
+        default=None,
+        help="Dot path to extract an auth token from login JSON, e.g. data.token",
+    )
+    parser.add_argument(
+        "--auth-header-template",
+        default=None,
+        help="Header template for extracted token, e.g. 'Authorization: Bearer {token}'",
+    )
     return parser.parse_args()
+
+
+def _read_cli_text(value: str | None, file_path: str | None, label: str) -> str | None:
+    """Read optional CLI text from an argument or file, but not both."""
+    if value and file_path:
+        raise SystemExit(f"Use either --{label} or --{label}-file, not both.")
+    if file_path:
+        path = Path(file_path).expanduser()
+        try:
+            return path.read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            raise SystemExit(f"Could not read {label} file '{path}': {exc}") from exc
+    if value:
+        return value.strip()
+    return None
 
 
 def _python_module_available(module: str) -> bool:
@@ -131,7 +206,7 @@ def check_tools(env_file: str = ".env") -> bool:
     ]
     config_required_tools: list[str] = []
     optional_tools = ["nikto", "amass", "gobuster", "whatweb", "wafw00f",
-                      "webanalyze", "wpscan", "joomscan", "dirsearch"]
+                      "webanalyze", "wpscan", "joomscan", "dirsearch", "s3scanner", "dalfox"]
 
     if getattr(config.scan, "enable_web_discovery", True):
         config_required_tools.extend(["katana", "gau"])
@@ -141,8 +216,20 @@ def check_tools(env_file: str = ".env") -> bool:
         config_required_tools.append("amass")
     if getattr(config.scan, "enable_gobuster", True):
         config_required_tools.append("gobuster")
+    if getattr(config.scan, "enable_dirsearch", False):
+        config_required_tools.append("dirsearch")
     if getattr(config.scan, "enable_fingerprint", True):
         config_required_tools.extend(["whatweb", "wafw00f"])
+    if getattr(config.scan, "enable_wpscan", False):
+        config_required_tools.append("wpscan")
+    if getattr(config.scan, "enable_joomscan", False):
+        config_required_tools.append("joomscan")
+    if getattr(config.scan, "enable_s3scanner", False):
+        config_required_tools.append("s3scanner")
+    if getattr(config.scan, "enable_sqlmap", False):
+        config_required_tools.append("sqlmap")
+    if getattr(config.scan, "enable_dalfox", False):
+        config_required_tools.append("dalfox")
 
     print("\n" + "=" * 50)
     print("  ScanBot - Tool Check")
@@ -242,7 +329,19 @@ def check_tools(env_file: str = ".env") -> bool:
     return True
 
 
-async def run_test_scan(target: str, config: "Config", scan_mode: str = "fast") -> None:
+async def run_test_scan(
+    target: str,
+    config: "Config",
+    scan_mode: str = "fast",
+    custom_cookies: str | None = None,
+    custom_headers: str | None = None,
+    auth_login_url: str | None = None,
+    auth_login_payload: str | None = None,
+    auth_token_json_path: str | None = None,
+    auth_header_template: str | None = None,
+    origin_ip: str | None = None,
+    api_endpoints: str | None = None,
+) -> None:
     """Run a complete scan outside Telegram for debugging."""
     from core.database import Database
     from core.job_manager import JobManager
@@ -266,6 +365,14 @@ async def run_test_scan(target: str, config: "Config", scan_mode: str = "fast") 
             raw_target=target,
             on_progress=on_progress,
             scan_mode=scan_mode,
+            custom_cookies=custom_cookies,
+            custom_headers=custom_headers,
+            auth_login_url=auth_login_url,
+            auth_login_payload=auth_login_payload,
+            auth_token_json_path=auth_token_json_path,
+            auth_header_template=auth_header_template,
+            origin_ip=origin_ip,
+            api_endpoints=api_endpoints,
         )
         print(f"  Job ID: {job.scan_id}")
 
@@ -364,13 +471,51 @@ def main() -> None:
 
     from config import load_config
 
-    config = load_config(args.config)
+    require_secrets = not (
+        args.test_scan
+        and str(args.scan_mode or "").strip().lower() in {"api", "api-only", "apiscan", "api-scan"}
+    )
+    config = load_config(args.config, require_secrets=require_secrets)
     if args.log_level:
         config.log_level = args.log_level
     setup_logging(config.log_level, config.log_dir)
 
     if args.test_scan:
-        asyncio.run(run_test_scan(args.test_scan, config, scan_mode=args.scan_mode))
+        api_endpoints = _read_cli_text(
+            args.api_endpoints,
+            args.api_endpoints_file,
+            "api-endpoints",
+        )
+        custom_headers = _read_cli_text(
+            args.custom_headers,
+            args.custom_headers_file,
+            "custom-headers",
+        )
+        custom_cookies = _read_cli_text(
+            args.custom_cookies,
+            args.custom_cookies_file,
+            "custom-cookies",
+        )
+        auth_login_payload = _read_cli_text(
+            args.auth_login_payload,
+            args.auth_login_payload_file,
+            "auth-login-payload",
+        )
+        asyncio.run(
+            run_test_scan(
+                args.test_scan,
+                config,
+                scan_mode=args.scan_mode,
+                custom_cookies=custom_cookies,
+                custom_headers=custom_headers,
+                auth_login_url=args.auth_login_url,
+                auth_login_payload=auth_login_payload,
+                auth_token_json_path=args.auth_token_json_path,
+                auth_header_template=args.auth_header_template,
+                origin_ip=args.origin_ip,
+                api_endpoints=api_endpoints,
+            )
+        )
         return
 
     asyncio.run(main_async(config, api_only=args.api_only))

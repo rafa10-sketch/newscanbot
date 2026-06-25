@@ -22,6 +22,14 @@ import ssl
 import struct
 from pipeline.base_stage import BaseStage
 
+try:
+    import httpx
+    HAS_HTTPX = True
+except ImportError:
+    HAS_HTTPX = False
+    import urllib.request
+    import urllib.error
+
 
 # ── CDN Signatures ─────────────────────────────────────────────────────────────
 _CDN_SIGNATURES = [
@@ -106,6 +114,34 @@ def _is_valid_public_ip(ip: str) -> bool:
         return False
 
 
+# Well-known DNS resolvers and APNIC/Cloudflare research IPs that frequently
+# appear as false-positive origin candidates.
+_FALSE_POSITIVE_NETWORKS = [
+    ipaddress.ip_network("1.0.0.0/24"),     # Cloudflare+APNIC DNS (1.0.0.1)
+    ipaddress.ip_network("1.1.1.0/24"),     # Cloudflare DNS (1.1.1.1)
+    ipaddress.ip_network("1.2.1.0/24"),     # APNIC research range
+    ipaddress.ip_network("8.8.8.0/24"),     # Google DNS
+    ipaddress.ip_network("8.8.4.0/24"),     # Google DNS
+    ipaddress.ip_network("9.9.9.0/24"),     # Quad9 DNS
+]
+_FALSE_POSITIVE_IPS = frozenset([
+    "1.0.0.1", "1.1.1.1", "1.0.1.1", "1.2.1.1",
+    "8.8.8.8", "8.8.4.4", "9.9.9.9",
+    "208.67.222.222", "208.67.220.220",  # OpenDNS
+])
+
+
+def _is_false_positive_origin(ip: str) -> bool:
+    """Filter known false-positive IPs (DNS resolvers, APNIC research ranges)."""
+    if ip in _FALSE_POSITIVE_IPS:
+        return True
+    try:
+        addr = ipaddress.ip_address(ip)
+        return any(addr in net for net in _FALSE_POSITIVE_NETWORKS)
+    except ValueError:
+        return False
+
+
 class OriginIPStage(BaseStage):
     """
     Stage 3: Origin IP Discovery (Upgraded — 9 Methods)
@@ -122,7 +158,7 @@ class OriginIPStage(BaseStage):
     NAME = "OriginIP"
 
     async def run(self) -> None:
-        self.log.info(f"[OriginIP] Starting 10-method origin IP discovery for {self.target}")
+        self.log.info(f"[OriginIP] Starting 11-method origin IP discovery for {self.target}")
 
         # ── Fetch realtime CDN IP ranges first ───────────────────────────────
         await self._fetch_cdn_ranges()
@@ -141,6 +177,7 @@ class OriginIPStage(BaseStage):
             self._method_zone_transfer(),
             self._method_shodan(),
             self._method_global_dns(),
+            self._method_recon_subdomains(),
             return_exceptions=True,
         )
 
@@ -150,6 +187,8 @@ class OriginIPStage(BaseStage):
             if isinstance(result, dict):
                 for ip, info in result.items():
                     if not _is_valid_public_ip(ip):
+                        continue
+                    if _is_false_positive_origin(ip):
                         continue
                     if ip not in discovered:
                         discovered[ip] = info
@@ -178,11 +217,43 @@ class OriginIPStage(BaseStage):
             if not d.get("is_cdn") and not d.get("is_cloudfront")
         ]
 
-        # ── Score candidates: prefer IPs confirmed by multiple methods ────────
-        def score(ip: str) -> int:
-            return len(discovered[ip].get("methods", []))
+        # ── Active Origin Verification ────────────────────────────────────────
+        verified_candidates = []
+        unverified_candidates = []
 
-        origin_candidates = sorted(origin_candidates, key=score, reverse=True)
+        if origin_candidates:
+            self.log.info(f"[OriginIP] Establishing target baseline for {self.target}...")
+            baseline = await self._get_target_baseline()
+            
+            self.log.info(f"[OriginIP] Verifying {len(origin_candidates)} non-CDN origin candidates actively...")
+            
+            async def verify_and_rank(ip: str):
+                res = await self._verify_candidate(ip, baseline)
+                if ip in discovered:
+                    discovered[ip]["verification"] = res
+                    if res["verified"]:
+                        discovered[ip]["methods"].append(f"verified_origin (score: {res['score']})")
+                
+                if res["verified"]:
+                    verified_candidates.append((ip, res["score"]))
+                else:
+                    unverified_candidates.append((ip, res["score"]))
+                    
+            await asyncio.gather(*[verify_and_rank(ip) for ip in origin_candidates])
+            
+            # Sort verified candidates by score (descending)
+            verified_candidates = sorted(verified_candidates, key=lambda x: x[1], reverse=True)
+            
+            # Sort unverified candidates by legacy method count / verification score
+            def unverified_score(item):
+                ip, active_score = item
+                legacy_count = len(discovered[ip].get("methods", []))
+                return (legacy_count, active_score)
+            
+            unverified_candidates = sorted(unverified_candidates, key=unverified_score, reverse=True)
+            
+            # Combined list: verified candidates ALWAYS take priority!
+            origin_candidates = [ip for ip, _ in verified_candidates] + [ip for ip, _ in unverified_candidates]
 
         self.ctx["origin_data"] = {
             "all_ips": list(discovered.keys()),
@@ -646,3 +717,187 @@ class OriginIPStage(BaseStage):
                     if _is_valid_public_ip(ip):
                         out[ip] = {"methods": ["global_dns"], "ptr": "", "is_cdn": False}
         return out
+
+    # ── Method 12: Stage 1 Recon Subdomain Resolution ───────────────────────
+    async def _method_recon_subdomains(self) -> dict:
+        """Resolve all subdomains discovered in Stage 1 Recon to find origin IP leaks."""
+        out = {}
+        subdomains = self.ctx.get("subdomains", [])
+        if not subdomains:
+            self.log.debug("[OriginIP] No Stage 1 subdomains found in context.")
+            return out
+
+        self.log.info(f"[OriginIP] Resolving {len(subdomains)} subdomains from Stage 1 Recon...")
+
+        async def resolve_sub(sub: str) -> None:
+            try:
+                loop = asyncio.get_event_loop()
+                ip = await loop.run_in_executor(None, socket.gethostbyname, sub)
+                if _is_valid_public_ip(ip):
+                    out[ip] = {
+                        "methods": [f"recon_sub:{sub}"],
+                        "ptr": "",
+                        "is_cdn": False,
+                    }
+            except Exception:
+                pass
+
+        # Concurrently resolve subdomains with a semaphore to prevent network clogging
+        sem = asyncio.Semaphore(50)
+        async def resolve_with_sem(sub: str):
+            async with sem:
+                await resolve_sub(sub)
+
+        await asyncio.gather(*[resolve_with_sem(sub) for sub in subdomains])
+        return out
+
+    # ── Active Origin Verification ──────────────────────────────────────────
+    async def _get_target_baseline(self) -> dict:
+        """Get baseline response characteristics from the target domain."""
+        baseline = {
+            "status_code": None,
+            "title": None,
+            "content_length": None,
+            "headers": {},
+        }
+        
+        urls = [f"https://{self.target}", f"http://{self.target}"]
+        for url in urls:
+            try:
+                if HAS_HTTPX:
+                    async with httpx.AsyncClient(verify=False, timeout=5.0, follow_redirects=True) as client:
+                        resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
+                        status_code = resp.status_code
+                        text = resp.text
+                        headers = resp.headers
+                else:
+                    # Fallback to urllib
+                    def fetch_urllib():
+                        req = urllib.request.Request(url)
+                        req.add_header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+                        ctx = ssl.create_default_context()
+                        ctx.check_hostname = False
+                        ctx.verify_mode = ssl.CERT_NONE
+                        try:
+                            with urllib.request.urlopen(req, timeout=5.0, context=ctx) as r:
+                                return r.status, r.read().decode("utf-8", errors="ignore"), dict(r.headers)
+                        except urllib.error.HTTPError as e:
+                            try:
+                                return e.code, e.read().decode("utf-8", errors="ignore"), dict(e.headers)
+                            except Exception:
+                                return e.code, "", dict(e.headers)
+                    
+                    loop = asyncio.get_event_loop()
+                    status_code, text, headers = await loop.run_in_executor(None, fetch_urllib)
+
+                baseline["status_code"] = status_code
+                baseline["content_length"] = len(text)
+                
+                title_match = re.search(r"<title>(.*?)</title>", text, re.IGNORECASE | re.DOTALL)
+                if title_match:
+                    baseline["title"] = title_match.group(1).strip()
+                
+                for h in ["Server", "X-Powered-By"]:
+                    h_val = headers.get(h) or headers.get(h.lower())
+                    if h_val:
+                        baseline["headers"][h] = h_val
+                
+                self.log.info(f"[OriginIP] Baseline fetched ({url}) -> Status={status_code}, Title='{baseline['title']}', Length={baseline['content_length']}")
+                break
+            except Exception as e:
+                self.log.debug(f"[OriginIP] Baseline fetch failed for {url}: {e}")
+                
+        return baseline
+
+    async def _verify_candidate(self, ip: str, baseline: dict) -> dict:
+        """Verify if a candidate IP actually hosts the target site by making direct requests with Host header."""
+        res = {
+            "verified": False,
+            "status": "unverified",
+            "score": 0,
+            "title": None,
+            "status_code": None,
+            "content_length": None,
+            "error": None,
+        }
+        
+        schemes = ["https", "http"]
+        for scheme in schemes:
+            url = f"{scheme}://{ip}/"
+            try:
+                if HAS_HTTPX:
+                    async with httpx.AsyncClient(verify=False, timeout=5.0, follow_redirects=True) as client:
+                        headers = {
+                            "Host": self.target,
+                            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                        }
+                        resp = await client.get(url, headers=headers)
+                        status_code = resp.status_code
+                        text = resp.text
+                        resp_headers = resp.headers
+                else:
+                    # Fallback to urllib
+                    def verify_urllib():
+                        req = urllib.request.Request(url)
+                        req.add_header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+                        req.add_header("Host", self.target)
+                        ctx = ssl.create_default_context()
+                        ctx.check_hostname = False
+                        ctx.verify_mode = ssl.CERT_NONE
+                        try:
+                            with urllib.request.urlopen(req, timeout=5.0, context=ctx) as r:
+                                return r.status, r.read().decode("utf-8", errors="ignore"), dict(r.headers)
+                        except urllib.error.HTTPError as e:
+                            try:
+                                return e.code, e.read().decode("utf-8", errors="ignore"), dict(e.headers)
+                            except Exception:
+                                return e.code, "", dict(e.headers)
+                    
+                    loop = asyncio.get_event_loop()
+                    status_code, text, resp_headers = await loop.run_in_executor(None, verify_urllib)
+
+                title = None
+                title_match = re.search(r"<title>(.*?)</title>", text, re.IGNORECASE | re.DOTALL)
+                if title_match:
+                    title = title_match.group(1).strip()
+                    
+                res["status_code"] = status_code
+                res["content_length"] = len(text)
+                res["title"] = title
+                
+                # Detect Cloudflare edge signatures on candidate IP
+                cf_sig = any(sig in text.lower() for sig in ["cloudflare", "direct ip access", "error 1003", "error 1000", "error 1016"])
+                cf_headers = any(h in resp_headers or h.lower() in resp_headers for h in ["cf-ray", "cf-cache-status"]) or "cloudflare" in str(resp_headers.get("Server", "") or resp_headers.get("server", "")).lower()
+                
+                if cf_sig or cf_headers:
+                    res["status"] = "cloudflare_edge_error"
+                    continue
+                
+                score = 0
+                if baseline["status_code"] and status_code == baseline["status_code"]:
+                    score += 20
+                if baseline["title"] and title and title.lower() == baseline["title"].lower():
+                    score += 50
+                elif baseline["title"] and title and (baseline["title"].lower() in title.lower() or title.lower() in baseline["title"].lower()):
+                    score += 30
+                if baseline["content_length"] and len(text) > 0:
+                    ratio = min(len(text), baseline["content_length"]) / max(len(text), baseline["content_length"])
+                    if ratio > 0.85:
+                        score += 30
+                    elif ratio > 0.60:
+                        score += 15
+                        
+                res["score"] = score
+                if score >= 50:
+                    res["verified"] = True
+                    res["status"] = "verified"
+                    self.log.info(f"[OriginIP] ✅ Verified Origin IP: {ip} (Score={score}, Title='{title}')")
+                    break
+                else:
+                    res["status"] = "unmatching"
+            except Exception as e:
+                res["error"] = str(e)
+                
+        return res
+
+
