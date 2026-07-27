@@ -24,21 +24,35 @@ class ServiceScanStage(BaseStage):
 
     NAME = "ServiceScan"
 
-    NSE_SCRIPTS = ",".join([
-        "banner",
-        "http-title",
-        "http-methods",
-        "http-server-header",
-        "ssl-cert",
-        "ssl-enum-ciphers",
-        "ftp-anon",
-        "smtp-open-relay",
-        "rdp-enum-encryption",
-        "vnc-info",
-        "mongodb-info",
-        "redis-info",
-        "ms-sql-info",
-    ])
+    def _get_nse_scripts(self) -> str:
+        base_scripts = [
+            "banner",
+            "http-title",
+            "http-methods",
+            "http-server-header",
+            "ssl-cert",
+            "ssl-enum-ciphers",
+            "ftp-anon",
+            "smtp-open-relay",
+            "rdp-enum-encryption",
+            "vnc-info",
+            "mongodb-info",
+            "redis-info",
+            "ms-sql-info",
+        ]
+        
+        mode = self.ctx.get("scan_mode", "fast")
+        if mode in ("safe", "deep"):
+            # Perluasan enumerasi aset yang sah (Legitimate enumeration for asset management)
+            base_scripts.extend([
+                "snmp-info",
+                "snmp-sysdescr",
+                "ldap-rootdse",
+                "smb-os-discovery",
+                "smb-security-mode"
+            ])
+            
+        return ",".join(base_scripts)
 
     async def run(self) -> None:
         self.clear_stage_error()
@@ -95,10 +109,17 @@ class ServiceScanStage(BaseStage):
             "-p", ports_arg,
             "-oX", str(xml_out),
             "-oG", str(grep_out),
-            "--script", self.NSE_SCRIPTS,
+            "--script", self._get_nse_scripts(),
         ]
 
         requested_flags = cfg.nmap_flags.split()
+        
+        mode = self.ctx.get("scan_mode", "fast")
+        if mode == "safe" and "-sC" in requested_flags:
+            # -sC runs default scripts, some of which might be slightly intrusive.
+            # We rely on our curated list of safe scripts instead for safe mode.
+            requested_flags.remove("-sC")
+
         cmd = cmd_prefix + requested_flags + targets[:5]
         result = await self.runner.run(cmd=cmd, timeout=cfg.nmap_timeout)
         self.log_result(result)

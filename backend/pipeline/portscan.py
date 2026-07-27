@@ -59,10 +59,18 @@ class PortScanStage(BaseStage):
     async def _run_naabu(self, targets_file: Path, cdn_only: bool = False) -> None:
         cfg = self.config
 
+        # 1. Determine the rate. 
+        # If this is a deep scan (custom ports defined), force a very high rate 
+        # to try and beat the job_manager's timeout limit.
+        scan_rate = str(cfg.naabu_rate)
+        if cfg.naabu_ports:
+            self.log.info(f"[PortScan] Deep scan detected (ports: {cfg.naabu_ports}): forcing high scan rate (3000) to beat timeout limit.")
+            scan_rate = "3000"
+
         cmd = [
             "naabu",
             "-l", str(targets_file),
-            "-rate", str(cfg.naabu_rate),
+            "-rate", scan_rate,
             "-retries", str(cfg.naabu_retries),
             "-silent",
             "-json",
@@ -80,6 +88,7 @@ class PortScanStage(BaseStage):
             extra_str = ",".join(str(p) for p in self.EXTRA_PORTS)
             cmd += ["-top-ports", str(cfg.naabu_top_ports), "-p", extra_str]
 
+        # 2. Execute Naabu
         result = await self.runner.run(
             cmd=cmd,
             timeout=cfg.naabu_timeout,

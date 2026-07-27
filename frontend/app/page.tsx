@@ -45,7 +45,7 @@ export default function HomePage() {
   const router = useRouter();
   const [target, setTarget] = useState("");
   const [originIp, setOriginIp] = useState("");
-  const [scanMode, setScanMode] = useState<"fast" | "deep" | "api">("fast");
+  const [scanMode, setScanMode] = useState<"fast" | "deep" | "safe" | "api">("fast");
   const [apiEndpoints, setApiEndpoints] = useState("");
   const [apiDraftMethod, setApiDraftMethod] = useState("GET");
   const [apiDraftPath, setApiDraftPath] = useState("");
@@ -269,6 +269,13 @@ export default function HomePage() {
               </button>
               <button
                 type="button"
+                className={`mode-option ${scanMode === "safe" ? "active safe" : ""}`}
+                onClick={() => setScanMode("safe")}
+              >
+                🛡️ Safe
+              </button>
+              <button
+                type="button"
                 className={`mode-option ${scanMode === "api" ? "active api" : ""}`}
                 onClick={() => setScanMode("api")}
               >
@@ -278,9 +285,11 @@ export default function HomePage() {
             <span className="mode-hint">
               {scanMode === "fast"
                 ? "Quick reconnaissance scan"
-                : scanMode === "deep"
-                  ? "Thorough deep analysis — takes longer"
-                  : "Authenticated application-layer API checks"}
+                : scanMode === "safe"
+                  ? "Defensive, reliable enumeration — avoids DoS"
+                  : scanMode === "deep"
+                    ? "Thorough deep analysis — takes longer"
+                    : "Authenticated application-layer API checks"}
             </span>
           </div>
           {scanMode === "api" && (

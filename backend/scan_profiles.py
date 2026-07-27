@@ -12,6 +12,7 @@ class ScanMode(str, Enum):
     FAST = "fast"
     DEEP = "deep"
     API = "api"
+    SAFE = "safe"
 
     @classmethod
     def from_str(cls, value: str) -> "ScanMode":
@@ -20,6 +21,8 @@ class ScanMode(str, Enum):
             return cls.DEEP
         if normalized in ("api", "api-only", "apiscan", "api-scan"):
             return cls.API
+        if normalized in ("safe", "defensive", "stealth"):
+            return cls.SAFE
         return cls.FAST
 
 
@@ -57,24 +60,59 @@ DEEP_OVERRIDES: dict = {
     "total_scan_timeout":    14400,
 }
 
+# Overrides applied for safe mode to protect network stability and avoid DoS.
+SAFE_OVERRIDES: dict = {
+    # Network Stability - much slower rates, more retries
+    "naabu_rate":            200,
+    "naabu_retries":         5,
+    "naabu_timeout":         600,
+
+    # Service detection - more stable timing
+    "nmap_timing":           "T3",
+    "nmap_timeout":          2400,
+
+    # HTTP probing - gentle on web servers
+    "httpx_threads":         20,
+    "httpx_rate_limit":      50,
+
+    # Nuclei - gentle rate
+    "nuclei_severity":       "critical,high,medium",
+    "nuclei_rate_limit":     50,
+}
+
 # Deep-mode value for max nuclei targets (used by VulnScanStage)
 DEEP_MAX_NUCLEI_TARGETS = 12
 
 
 def apply_profile(base_config, mode: ScanMode):
     """
-    Return a copy of the ScanConfig with deep-mode overrides applied.
+    Return a copy of the ScanConfig with mode overrides applied.
     Fast mode returns an unmodified copy.
     """
     config = copy.copy(base_config)
 
+    overrides = None
     if mode == ScanMode.DEEP:
-        for key, value in DEEP_OVERRIDES.items():
+        overrides = DEEP_OVERRIDES
+    elif mode == ScanMode.SAFE:
+        overrides = SAFE_OVERRIDES
+
+    if overrides:
+        for key, value in overrides.items():
             if hasattr(config, key):
                 base_val = getattr(config, key)
-                # If both are integers (e.g. timeouts), take the max so .env can override explicitly
+                # For DEEP mode, we usually take max() for ints.
+                # For SAFE mode, we take max() for timeouts/retries, but min() for rates/threads.
                 if isinstance(base_val, int) and isinstance(value, int) and not isinstance(value, bool):
-                    setattr(config, key, max(base_val, value))
+                    if mode == ScanMode.SAFE:
+                        if "timeout" in key or "retries" in key:
+                            setattr(config, key, max(base_val, value))
+                        elif "rate" in key or "threads" in key or "max" in key:
+                            setattr(config, key, min(base_val, value))
+                        else:
+                            setattr(config, key, value)
+                    else:
+                        setattr(config, key, max(base_val, value))
                 else:
                     setattr(config, key, value)
 

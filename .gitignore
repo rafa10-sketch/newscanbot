@@ -21,6 +21,7 @@ backend/data/
 backend/logs/
 backend/reports/
 backend/work/
+request.txt
 
 # IDE
 .vscode/

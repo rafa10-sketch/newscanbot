@@ -258,9 +258,11 @@ export default function ScanPage() {
           <span className={`scan-mode-badge ${scan.scanMode}`}>
             {scan.scanMode === "deep"
               ? "🔬 In-Depth Scan"
-              : scan.scanMode === "api"
-                ? "API Scan"
-                : "⚡ Fast Scan"}
+              : scan.scanMode === "safe"
+                ? "🛡️ Safe Scan"
+                : scan.scanMode === "api"
+                  ? "API Scan"
+                  : "⚡ Fast Scan"}
           </span>
         )}
 
@@ -284,8 +286,8 @@ export default function ScanPage() {
           </div>
           <div style={{ display: 'flex', justifyContent: 'space-around', alignItems: 'center', position: 'relative' }}>
             <div className="pipeline-node">
-              <div className={`stage-icon ${scan.stages.some(s => s.state === 'running' && ["PortScan", "ServiceScan"].includes(s.name)) ? 'running' : ''}`} 
-                   style={{ background: 'var(--bg-glass)', padding: '15px', borderRadius: '12px', fontSize: '1.5rem', border: '1px solid var(--border-color)' }}>🛡️</div>
+              <div className={`stage-icon ${scan.stages.some(s => s.state === 'running' && ["PortScan", "ServiceScan"].includes(s.name)) ? 'running' : ''}`}
+                style={{ background: 'var(--bg-glass)', padding: '15px', borderRadius: '12px', fontSize: '1.5rem', border: '1px solid var(--border-color)' }}>🛡️</div>
               <div style={{ fontSize: '0.75rem', fontWeight: 600, marginTop: '0.5rem' }}>INFRASTRUCTURE</div>
               {scan.stages.some(s => s.state === 'running' && ["PortScan", "ServiceScan"].includes(s.name)) && (
                 <div className="worker-thread"><span className="worker-dot" /> Scanning</div>
@@ -293,12 +295,12 @@ export default function ScanPage() {
             </div>
 
             <div style={{ flex: 1, height: '1px', background: 'var(--border-color)', margin: '0 1rem', position: 'relative' }}>
-               <div style={{ position: 'absolute', top: '-10px', left: '50%', transform: 'translateX(-50%)', background: 'var(--bg-card)', padding: '0 10px', fontSize: '0.6rem', color: 'var(--text-muted)' }}>PARALLEL BUS</div>
+              <div style={{ position: 'absolute', top: '-10px', left: '50%', transform: 'translateX(-50%)', background: 'var(--bg-card)', padding: '0 10px', fontSize: '0.6rem', color: 'var(--text-muted)' }}>PARALLEL BUS</div>
             </div>
 
             <div className="pipeline-node">
-              <div className={`stage-icon ${scan.stages.some(s => s.state === 'running' && ["HTTPProbe", "Fingerprint", "WebDiscovery", "VulnScan", "TLSScan"].includes(s.name)) ? 'running' : ''}`} 
-                   style={{ background: 'var(--bg-glass)', padding: '15px', borderRadius: '12px', fontSize: '1.5rem', border: '1px solid var(--border-color)' }}>🌐</div>
+              <div className={`stage-icon ${scan.stages.some(s => s.state === 'running' && ["HTTPProbe", "Fingerprint", "WebDiscovery", "VulnScan", "TLSScan"].includes(s.name)) ? 'running' : ''}`}
+                style={{ background: 'var(--bg-glass)', padding: '15px', borderRadius: '12px', fontSize: '1.5rem', border: '1px solid var(--border-color)' }}>🌐</div>
               <div style={{ fontSize: '0.75rem', fontWeight: 600, marginTop: '0.5rem' }}>WEB ANALYSIS</div>
               {scan.stages.some(s => s.state === 'running' && ["HTTPProbe", "Fingerprint", "WebDiscovery", "VulnScan", "TLSScan"].includes(s.name)) && (
                 <div className="worker-thread"><span className="worker-dot" /> Analyzing</div>
@@ -390,43 +392,43 @@ export default function ScanPage() {
         {/* Post-Scan Timeline Proof */}
         {isTerminal && (
           <div className="timeline-container" style={{ marginTop: '2rem' }}>
-             <div className="timeline-header">
-                <div className="card-title" style={{ margin: 0 }}>📊 Execution Timeline Analysis</div>
-                <div className="card-subtitle">Historical proof of parallel task synchronization</div>
-             </div>
-             <div className="timeline-chart">
-                {(() => {
-                  const stagesWithTime = scan.stages.filter(s => s.startedAt);
-                  const minStart = Math.min(...stagesWithTime.map(s => new Date(s.startedAt!).getTime()));
-                  const maxEnd = Math.max(...stagesWithTime.map(s => s.completedAt ? new Date(s.completedAt).getTime() : Date.now()));
-                  const totalDuration = maxEnd - minStart || 1;
+            <div className="timeline-header">
+              <div className="card-title" style={{ margin: 0 }}>📊 Execution Timeline Analysis</div>
+              <div className="card-subtitle">Historical proof of parallel task synchronization</div>
+            </div>
+            <div className="timeline-chart">
+              {(() => {
+                const stagesWithTime = scan.stages.filter(s => s.startedAt);
+                const minStart = Math.min(...stagesWithTime.map(s => new Date(s.startedAt!).getTime()));
+                const maxEnd = Math.max(...stagesWithTime.map(s => s.completedAt ? new Date(s.completedAt).getTime() : Date.now()));
+                const totalDuration = maxEnd - minStart || 1;
 
-                  return (
-                    <>
-                      {scan.stages.map(stage => {
-                        if (!stage.startedAt) return null;
-                        const start = new Date(stage.startedAt).getTime();
-                        const end = stage.completedAt ? new Date(stage.completedAt).getTime() : Date.now();
-                        const left = ((start - minStart) / totalDuration) * 100;
-                        const width = ((end - start) / totalDuration) * 100;
+                return (
+                  <>
+                    {scan.stages.map(stage => {
+                      if (!stage.startedAt) return null;
+                      const start = new Date(stage.startedAt).getTime();
+                      const end = stage.completedAt ? new Date(stage.completedAt).getTime() : Date.now();
+                      const left = ((start - minStart) / totalDuration) * 100;
+                      const width = ((end - start) / totalDuration) * 100;
 
-                        return (
-                          <div key={stage.name} className="timeline-row">
-                            <div className="timeline-label">{STAGE_LABELS[stage.name] || stage.name}</div>
-                            <div className="timeline-track">
-                              <div className={`timeline-bar ${stage.state}`} style={{ left: `${left}%`, width: `${Math.max(width, 1)}%` }} />
-                            </div>
+                      return (
+                        <div key={stage.name} className="timeline-row">
+                          <div className="timeline-label">{STAGE_LABELS[stage.name] || stage.name}</div>
+                          <div className="timeline-track">
+                            <div className={`timeline-bar ${stage.state}`} style={{ left: `${left}%`, width: `${Math.max(width, 1)}%` }} />
                           </div>
-                        );
-                      })}
-                      <div className="timeline-axis">
-                        <span className="timeline-tick">0s</span>
-                        <span className="timeline-tick">{(totalDuration / 1000).toFixed(1)}s</span>
-                      </div>
-                    </>
-                  );
-                })()}
-             </div>
+                        </div>
+                      );
+                    })}
+                    <div className="timeline-axis">
+                      <span className="timeline-tick">0s</span>
+                      <span className="timeline-tick">{(totalDuration / 1000).toFixed(1)}s</span>
+                    </div>
+                  </>
+                );
+              })()}
+            </div>
           </div>
         )}
 
