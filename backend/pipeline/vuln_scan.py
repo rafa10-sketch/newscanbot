@@ -289,6 +289,8 @@ class VulnScanStage(BaseStage):
             "-nointeractive",
             "-Tuning",
             "1234578",
+	    "-maxtime",
+	    "10m",
         ]
         if ssl:
             cmd.append("-ssl")
@@ -421,6 +423,8 @@ class VulnScanStage(BaseStage):
             str(worker_count),
             "--timeout",
             str(max(1, int(getattr(self.config, "dalfox_request_timeout", 10)))),
+	    "--skip-headless",
+	    "--skip-mining-dom"
         ]
 
         if deep_domxss:
@@ -851,6 +855,17 @@ class VulnScanStage(BaseStage):
             )
         ):
             return False
+
+        # Additional safe mode filtering to reduce false positives
+        mode = self.ctx.get("scan_mode", "fast")
+        if mode == "safe":
+            # In safe mode, drop medium-severity findings that are often noisy (default pages, generic detections, etc.)
+            # unless they are explicitly validated.
+            if severity == "medium" and any(term in name for term in ("default", "generic", "detect", "panel", "info")):
+                return False
+            # Also drop findings that are often triggered by standard WAF/404 responses
+            if "waf" in name or "404" in name or "not found" in name:
+                return False
 
         return True
 
